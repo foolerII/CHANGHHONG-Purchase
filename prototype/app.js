@@ -17,6 +17,8 @@ const fmt = n => Number(n || 0).toFixed(2);
 const sumCents = (arr, pick) => arr.reduce((s, x) => s + cents(pick(x)), 0);
 const dict = (t, v) => (D.dicts[t] && D.dicts[t][v]) || v || '';
 const amountOk = v => /^\d+(\.\d{1,2})?$/.test(String(v).trim());
+// 批量导入专用：超两位小数四舍五入保留两位（与手工填写的 amountOk 报错规则不同，方案 3.2.2.4）
+const round2 = v => Math.round(Number(v || 0) * 100) / 100;
 const uniq = (arr, k) => [...new Set(arr.map(x => x[k]).filter(Boolean))].sort();
 
 let uidSeq = 1000;
@@ -25,45 +27,10 @@ const nextUid = () => 'U' + (++uidSeq);
 /* 当前角色权限（方案 3.2.1 / 3.3.1） */
 const perm = () => D.roles[D.auth.role];
 
-/* 演示模式：打开时显示角色切换与字段口径说明号，关闭后即为上线形态 */
-let demoMode = true;
-
-/* 字段口径说明，来源为方案「核心口径」与各页字段表 */
-const FIELD_NOTES = {
-  '合同出库金额': '数仓每日同步至项目管理平台的合同出库金额，默认为 0。预警推送要求该值大于 0。',
-  '预计返利金额': '项目管理平台合同中的预计返利金额，原币种，合同行级。',
-  '合同剩余返利金额': '预计返利金额 − 该合同行下有效关联金额合计，关联返利与关联到款合并计算。',
-  '关联类型': '按合同行已有的有效关联展示。到款行关联金额为 0 或为空时不展示「关联到款」。',
-  '已上账金额': '返利池系统中该返利ID已完成上账的金额。',
-  '已关联金额': '该返利编码被全部合同有效关联的金额之和。',
-  '剩余可关联金额': '已上账金额 − 已关联金额，含本合同已保存的关联。编辑已保存记录时需把本合同占用加回。',
-  '本次关联金额': '必填，大于 0，最多两位小数。已保存的关联返利行不可修改。',
-  '挑款金额': '到款系统中该到款ID的到款金额。同一合同多个合同行使用同一到款ID时，关联金额需合并计算。',
-  '关联金额': '按到款ID替换：原记录置失效并新增一条本次金额的记录。填 0 表示取消该笔关联。',
-  '关联方式': '关联返利与关联到款可在同一次保存中一并提交，不再限制同一合同只能用一种方式。',
-  '是否有效': '删除、解锁、自动释放、覆盖替换后置为失效，失效记录不再占用额度。',
-  '返利编码': '默认按合同行核算大类过滤剩余可关联金额大于 0 的返利；勾选按产品线查询可扩大范围。',
-  '到款ID': '由到款系统的挑款关系自动带出，每个到款ID一行，用户只填关联金额。'
-};
-
-// 每个页面独立编号，进入新页面重新从 1 开始
-let noteSeq = [];
-const resetNotes = () => { noteSeq = []; };
-const th = t => {
-  const note = FIELD_NOTES[t];
-  if (!note || !demoMode) return esc(t);
-  let i = noteSeq.findIndex(x => x.field === t);
-  if (i < 0) { noteSeq.push({ field: t, note: note }); i = noteSeq.length - 1; }
-  return `${esc(t)}<span class="note-no">${i + 1}</span>`;
-};
-function renderLegend(el) {
-  const box = $(el);
-  if (!demoMode || !noteSeq.length) { box.innerHTML = ''; box.hidden = true; return; }
-  box.hidden = false;
-  box.innerHTML = `<div class="legend-head"><span class="note-no">#</span>字段口径说明（仅评审与开发查看，关闭演示模式后隐藏）</div>
-    <ol class="legend-list">${noteSeq.map((x, i) =>
-      `<li><span class="note-no">${i + 1}</span><b>${esc(x.field)}</b>${esc(x.note)}</li>`).join('')}</ol>`;
-}
+/* 开发模式：打开时显示角色切换、演示工具入口，以及字段级说明提示；关闭后即为上线形态 */
+let devMode = true;
+/* 场景优化（增补需求，2026-09-10 会议纪要）：打开后编辑页出现新关联方式；关闭即为改动前的基线原型 */
+let addonMode = true;
 
 function toast(text, type) {
   const el = $('#toast');
@@ -75,15 +42,19 @@ function toast(text, type) {
 
 /* ---------------- 派生数据 ---------------- */
 const validCorrs = cid => D.correlations.filter(c => c.contractId === cid && c.status === 1);
+// 增补需求：合同剩余返利金额要扣减「审批中」记录，这里额外提供一个 有效+审批中 的口径
+const effectiveCorrs = cid => D.correlations.filter(c => c.contractId === cid && (c.status === 1 || c.status === 2));
+const hasPendingApproval = cid => D.correlations.some(c => c.contractId === cid && c.status === 2);
 
-// 合同剩余返利金额 = 预计返利金额 − 有效关联合计（关联返利 + 关联到款合并）
-const contractRebateCents = c => cents(c.totalRebate) - sumCents(validCorrs(c.id), x => x.theCorrelationAmount);
+// 合同剩余返利金额 = 预计返利金额 − （有效 + 审批中）关联合计（关联返利 + 关联到款 + 关联货款合并）
+const contractRebateCents = c => cents(c.totalRebate) - sumCents(effectiveCorrs(c.id), x => x.theCorrelationAmount);
 
-// 关联类型：到款行金额为 0 或空时不展示「关联到款」
+// 关联类型：到款/货款行金额为 0 或空时不展示对应标签；审批中的记录也计入展示（业务能看到这笔占着额度）
 function theType(c) {
-  const l = validCorrs(c.id), out = [];
+  const l = effectiveCorrs(c.id), out = [];
   if (l.some(x => x.correlationType === '关联返利')) out.push('关联返利');
   if (l.some(x => x.correlationType === '关联到款' && cents(x.theCorrelationAmount) > 0)) out.push('关联到款');
+  if (l.some(x => x.correlationType === '关联货款' && cents(x.theCorrelationAmount) > 0)) out.push('关联货款');
   return out.join('、');
 }
 
@@ -96,9 +67,23 @@ function rebateStat(coding) {
   return { already: already, residue: cents(base.alreadyBillAmount) - already };
 }
 
-const pendingContracts = () => D.contracts.filter(c => !c.terminated && contractRebateCents(c) > 0);
-const linkedContracts = () => D.contracts.filter(c => !c.terminated && contractRebateCents(c) === 0);
+/* ---- 增补需求：共享到款池（跨合同关联/跨客户关联/厂商款补/其他款补共用） ----
+ * 口径与 rebateStat 一致：谁先关联谁先占用挑款总金额，已用金额按「有效 + 审批中」合并计算，跨全部合同求和。 */
+const SPECIAL_DK_SUBTYPES = ['跨合同关联', '跨客户关联', '厂商款补', '其他款补'];
+function sharedDaokuanStat(daokuanId) {
+  const already = sumCents(
+    D.correlations.filter(c => (c.status === 1 || c.status === 2) && c.correlationType === '关联到款'
+      && SPECIAL_DK_SUBTYPES.includes(c.subType) && c.daokuanId === daokuanId),
+    c => c.theCorrelationAmount);
+  const base = D.sharedDaokuan.find(d => d.daokuanId === daokuanId) || { totalPickedAmount: 0 };
+  return { already: already, residue: cents(base.totalPickedAmount) - already };
+}
+
+// 增补需求例外：合同下还挂着 status=2（审批中）记录时，即使算出来剩余为 0，也停留在待关联，不移入已关联
+const pendingContracts = () => D.contracts.filter(c => !c.terminated && (contractRebateCents(c) > 0 || hasPendingApproval(c.id)));
+const linkedContracts = () => D.contracts.filter(c => !c.terminated && contractRebateCents(c) === 0 && !hasPendingApproval(c.id));
 const contractById = id => D.contracts.find(c => c.id === id);
+const contractByNo = no => D.contracts.find(c => c.contractNo === no); // 增补需求：来源合同信息按合同号查（原型演示用，取首个匹配行）
 
 /* ---------------- 筛选 ---------------- */
 const like = (v, q) => !q || String(v == null ? '' : v).toLowerCase().includes(String(q).toLowerCase());
@@ -187,22 +172,23 @@ const PAGES = {
     title: '已关联返利明细列表',
     actions: () => ['导出查询结果', '查询', '重置'],
     columns: ['序号', '关联日期', '合同号', '合同出库金额', '事业部', '客户名称', '产品线名称', '核算大类', '币种',
-      '预计返利金额', '关联类型', '关联返利编码', '返利名称', '已上账金额', '剩余可关联金额', '到款ID', '挑款金额', '关联金额'],
-    rows: f => D.correlations.filter(r => r.status === 1).map(r => ({ r: r, c: contractById(r.contractId) || {} }))
+      '预计返利金额', '关联类型', '关联返利编码', '返利名称', '已上账金额', '剩余可关联金额', '到款ID / 杂入单号', '挑款金额', '关联金额', '审批状态'],
+    rows: f => D.correlations.filter(r => r.status === 1 || r.status === 2).map(r => ({ r: r, c: contractById(r.contractId) || {} }))
       .filter(x => !x.c.terminated)
       .filter(x => like(x.c.contractNo, f.contractNo) && like(x.c.customer, f.customer)
         && eqv(x.c.accountCate, f.accountCate) && like(x.r.rebateCoding, f.rebateCoding)
         && inRange(x.r.correlationDate, f.correlationDate_start, f.correlationDate_end))
       .map((x, i) => {
-        const r = x.r, c = x.c, isFl = r.correlationType === '关联返利';
+        const r = x.r, c = x.c, isFl = r.correlationType === '关联返利', isDk = r.correlationType === '关联到款';
         const st = isFl ? rebateStat(r.rebateCoding) : null;
+        const typeLabel = r.correlationType + (isDk && r.subType && r.subType !== '通用关联' ? `-${r.subType}` : '');
         return {
           key: r.id,
           cells: [i + 1, r.correlationDate, c.contractNo, fmt(c.outboundAmount), c.businessDivision, c.customer,
-            c.productLine, c.accountCate, dict('cmn_currency_code', c.currency), fmt(c.totalRebate), r.correlationType,
+            c.productLine, c.accountCate, dict('cmn_currency_code', c.currency), fmt(c.totalRebate), typeLabel,
             isFl ? r.rebateCoding : '—', isFl ? r.rebateName : '—', isFl ? fmt(r.alreadyBillAmount) : '—',
-            isFl ? fmt(yuan(st.residue)) : '—', isFl ? '—' : r.daokuanId, isFl ? '—' : fmt(r.pickedAmount),
-            fmt(r.theCorrelationAmount)],
+            isFl ? fmt(yuan(st.residue)) : '—', isFl ? '—' : (r.daokuanId || r.jcNo || '—'), isDk ? fmt(r.pickedAmount) : '—',
+            fmt(r.theCorrelationAmount), r.status === 2 ? '<span class="addon-badge pending">审批中</span>' : '—'],
           ops: null
         };
       })
@@ -228,6 +214,62 @@ const PAGES = {
       })
   }
 };
+
+/* ---------------- 字段级说明提示（开发模式） ----------------
+ * 只标注原型画面上看不出来的口径 / 校验规则，纯透传字段（合同号、事业部等）不标注。
+ * 与「PRD 说明」抽屉的「方案快速说明」内容对应，避免两处规则不一致，如需改口径请两边一起改。
+ * 是否落库、由前端还是后端实现由开发自行判断，这里只给算法口径，不做技术选型。 */
+const FIELD_HINTS = {
+  '合同剩余返利金额': '预计返利金额 − 同合同行下有效（status=1）关联金额合计（关联返利+关联到款合并计算）；保存关联、解锁、自动释放后都要重新计算',
+  '关联类型': '按合同行有效关联记录展示：出现「关联返利」记录则显示「关联返利」；出现「关联到款」且金额 > 0 的记录才显示「关联到款」，金额为 0 或空不计入',
+  '剩余可关联金额': '返利底表已上账金额 − 该返利编码被全部合同有效关联的金额之和（含本合同）；新增返利时默认 = 已上账金额',
+  '已关联金额': '该返利编码当前有效（status=1）关联金额合计；新增返利时默认 = 0',
+  '本次关联金额': '关联返利行必填且大于 0，最多两位小数；已保存的记录不可修改（编辑页保存校验）',
+  '关联金额': '关联到款行：≥ 0，最多两位小数；保存时覆盖原关联金额，= 0 表示未关联，或失效历史关联金额',
+  '返利编码': '关联返利行必须先选择返利，否则无法保存；同一合同行下同一返利编码可存在多行',
+  '是否解锁': '选择「是」时「解锁原因」必填，且整单至少勾选一条「是」才能保存',
+  '解锁原因': '「是否解锁」选「是」时必填；保存后台会记录解锁原因、操作人、操作时间',
+  '是否有效': '对应关联记录的 status 字段：有效=1，失效=0；失效记录不进入「已关联返利明细」列表，可在合同详情切换查看',
+  '合同出库金额': '取自数仓，经项目管理平台每日同步一次，默认值为 0',
+  '预计返利时间': '返利预警邮件推送节奏的计算基准；该字段变更后，推送节奏自动跟随调整',
+  /* 增补需求（2026-09-10）字段说明 */
+  '来源合同号': '增补：跨合同/跨客户/厂商款补/其他款补场景专属，这笔到款原本挂靠的合同号，点击可查看来源合同的客户名称等信息，固定列不随横向滚动移出视口',
+  '挑款总金额': '增补：4 类特殊到款场景的共享到款池额度，跨合同共享，不是该合同专属；口径同返利编码的「已上账金额」',
+  '剩余可用': '增补：挑款总金额 − 全部合同对该到款ID的有效 + 审批中关联金额之和，谁先关联谁先占用（与返利编码「剩余可关联金额」同一口径）',
+  '杂入单编号': '增补：手工填写，保存时只校验该编号是否真实存在（调用外部系统接口），不做金额校验；同一编号允许重复关联、支持多张杂入单',
+  '审批状态': '增补：status=2 时显示「审批中」，占用共享到款额度；通过后变为有效不再标注，驳回后失效并释放额度'
+};
+
+// 按钮级说明（保存等操作按钮的完整逻辑），key 对应按钮的 data-act
+const ACTION_HINTS = {
+  'save': '先执行保存校验（见「保存校验」组，六项，任一不通过整单不保存）；通过后：关联返利新增行生效、写入已关联返利明细、更新返利底表已关联金额；关联到款按到款ID覆盖原记录（原记录失效、新记录生效）；最后重算合同剩余返利金额，> 0 留在待关联，= 0 移入已关联。',
+  'save-unlock': '校验：至少勾选一条「是否解锁 = 是」，且勾选的记录必须填写解锁原因；通过后：所选记录失效并释放金额，重算返利底表与合同剩余返利金额，合同回到待关联返利合同列表，并发送释放通知邮件。'
+};
+
+// 统一构造表头单元格：checkbox/resizer 等自带 HTML 的列原样输出；开发模式下命中 FIELD_HINTS 的列在字段名后加编号角标
+let hintCollector = [];
+const resetHints = () => { hintCollector = []; };
+
+const STICKY_HEADERS = ['操作', '来源合同号'];
+function thCell(label) {
+  const raw = String(label);
+  if (raw.startsWith('<input') || raw.startsWith('<button')) return `<th>${raw}</th>`;
+  const stickyCls = STICKY_HEADERS.includes(raw) ? ' class="col-sticky"' : '';
+  const hint = devMode && FIELD_HINTS[raw];
+  if (!hint) return `<th${stickyCls}>${esc(raw)}</th>`;
+  hintCollector.push({ label: raw, hint: hint });
+  const n = hintCollector.length;
+  return `<th${stickyCls}><span class="th-hint" data-tip="${esc(hint)}">${esc(raw)}<sup class="th-num">${n}</sup></span></th>`;
+}
+
+// 按钮文字加同样的编号角标 + 悬浮说明，用于「保存」这类看不出内部逻辑的操作按钮
+function actionHintLabel(text, actKey) {
+  const hint = devMode && ACTION_HINTS[actKey];
+  if (!hint) return esc(text);
+  hintCollector.push({ label: text, hint: hint });
+  const n = hintCollector.length;
+  return `<span class="th-hint" data-tip="${esc(hint)}">${esc(text)}<sup class="th-num">${n}</sup></span>`;
+}
 
 /* ---------------- 列表渲染 ---------------- */
 let currentPage = 'pending';
@@ -268,13 +310,16 @@ function renderList() {
   if (ps.page > pages) ps.page = pages;
   const rows = all.slice((ps.page - 1) * ps.size, ps.page * ps.size);
 
-  resetNotes();
-  $('#thead').innerHTML = `<tr>${p.columns.map(c => `<th>${th(c)}</th>`).join('')}</tr>`;
+  resetHints();
+  $('#thead').innerHTML = `<tr>${p.columns.map(thCell).join('')}</tr>`;
   $('#tbody').innerHTML = rows.length
-    ? rows.map(r => `<tr data-key="${r.key}">${r.cells.map(v => `<td title="${esc(v)}">${String(v).startsWith('<input') ? v : esc(v)}</td>`).join('')}${
-        r.ops ? `<td>${r.ops.map(o => `<button class="link" data-op="${o[1]}" data-key="${r.key}">${o[0]}</button>`).join(' ')}</td>` : ''}</tr>`).join('')
+    ? rows.map(r => `<tr data-key="${r.key}">${r.cells.map(v => {
+        const s = String(v);
+        const isHtml = s.startsWith('<input') || s.startsWith('<span');
+        return `<td title="${isHtml ? '' : esc(v)}">${isHtml ? v : esc(v)}</td>`;
+      }).join('')}${
+        r.ops ? `<td class="col-sticky">${r.ops.map(o => `<button class="link" data-op="${o[1]}" data-key="${r.key}">${o[0]}</button>`).join(' ')}</td>` : ''}</tr>`).join('')
     : `<tr><td class="empty" colspan="${p.columns.length}">暂无数据</td></tr>`;
-  renderLegend('#note-legend');
   renderPager(all.length, pages, ps);
 }
 
@@ -312,11 +357,25 @@ function buildEditRows(contract) {
     });
   });
   D.daokuanPicks.filter(p => p.contractNo === contract.contractNo).forEach(p => {
-    const saved = validCorrs(contract.id).find(c => c.correlationType === '关联到款' && c.daokuanId === p.daokuanId);
+    const saved = validCorrs(contract.id).find(c => c.correlationType === '关联到款' && c.daokuanId === p.daokuanId && (!c.subType || c.subType === '通用关联'));
     rows.push({
-      uid: nextUid(), id: saved ? saved.id : '', saved: !!saved, correlationType: '关联到款',
+      uid: nextUid(), id: saved ? saved.id : '', saved: !!saved, correlationType: '关联到款', subType: '通用关联',
       daokuanId: p.daokuanId, pickedAmount: p.pickedAmount,
       theCorrelationAmount: saved ? fmt(saved.theCorrelationAmount) : '0.00'
+    });
+  });
+  // 增补需求：4 类特殊到款场景 + 关联货款，已保存（status=1，审批已通过）的记录也带出来展示，但不可再编辑（金额锁定，提交中的记录不在此出现）
+  validCorrs(contract.id).filter(c => c.correlationType === '关联到款' && SPECIAL_DK_SUBTYPES.includes(c.subType)).forEach(c => {
+    rows.push({
+      uid: nextUid(), id: c.id, saved: true, correlationType: '关联到款', subType: c.subType,
+      daokuanId: c.daokuanId, pickedAmount: c.pickedAmount, sourceContractNo: c.sourceContractNo, sourceCustomer: c.sourceCustomer,
+      theCorrelationAmount: fmt(c.theCorrelationAmount)
+    });
+  });
+  validCorrs(contract.id).filter(c => c.correlationType === '关联货款').forEach(c => {
+    rows.push({
+      uid: nextUid(), id: c.id, saved: true, correlationType: '关联货款', jcNo: c.jcNo,
+      theCorrelationAmount: fmt(c.theCorrelationAmount)
     });
   });
   return rows;
@@ -324,7 +383,7 @@ function buildEditRows(contract) {
 
 function openDetail(contractId, mode) {
   const contract = contractById(contractId);
-  ctx = { contract: contract, mode: mode, filterType: '关联返利', statusFilter: '1' };
+  ctx = { contract: contract, mode: mode, filterType: '关联返利', subType: '通用关联', statusFilter: '1' };
   if (mode === 'edit') ctx.rows = buildEditRows(contract);
   renderDetail();
 }
@@ -350,51 +409,76 @@ function renderDetail() {
   $('#view-list').hidden = true;
   $('#view-detail').hidden = false;
   const isEdit = ctx.mode === 'edit', isUnlock = ctx.mode === 'unlock';
+  resetHints();
 
   $('#crumb-current').textContent = isEdit ? '待关联返利详情列表（编辑）' : isUnlock ? '已关联返利详情列表（解锁）' : '待关联返利详情列表（详情）';
   $('#detail-title').textContent = $('#crumb-current').textContent;
 
   $('#detail-head-right').innerHTML = (!isEdit && !isUnlock)
     ? `<select id="status-filter">
-         <option value="1">有效</option><option value="0">失效</option><option value="">全部</option></select>` : '';
+         <option value="1">有效</option>${addonMode ? '<option value="2">审批中</option>' : ''}<option value="0">失效</option><option value="">全部</option></select>` : '';
   if ($('#status-filter')) $('#status-filter').value = ctx.statusFilter;
 
   $('#type-switch').innerHTML = isEdit
     ? `<div class="label">关联方式</div><div class="value"><select id="type-select">
-         <option value="关联返利">关联返利</option><option value="关联到款">关联到款</option></select></div>
-       <div class="msg">ⓘ 此处可切换关联方式，两种方式可在同一次保存中一并提交</div>` : '';
+         <option value="关联返利">关联返利</option><option value="关联到款">关联到款</option>${
+           addonMode ? '<option value="关联货款">关联货款</option>' : ''}</select></div>
+       <div class="msg">ⓘ 此处可切换关联方式</div>${
+         addonMode && ctx.filterType === '关联到款' ? `<div class="subtype-tabs">${
+           ['通用关联', '跨合同关联', '跨客户关联', '厂商款补', '其他款补'].map(t =>
+             `<button class="${t === ctx.subType ? 'on' : ''}" data-subtype="${esc(t)}">${esc(t)}</button>`).join('')
+         }</div>` : ''}` : '';
   if ($('#type-select')) $('#type-select').value = ctx.filterType;
 
-  resetNotes();
   isEdit ? renderEditTable() : isUnlock ? renderUnlockTable() : renderViewTable();
-  renderLegend('#detail-note-legend');
 
-  $('#detail-toolbar').innerHTML = (isEdit && ctx.filterType === '关联返利')
-    ? `<button class="btn primary" data-act="add-row">增加一行</button>
-       <button class="btn danger" data-act="del-row">删除所选</button>` : '';
+  $('#detail-toolbar').innerHTML = !isEdit ? '' : (() => {
+    if (ctx.filterType === '关联返利') return `<button class="btn primary" data-act="add-row">增加一行</button>
+       <button class="btn danger" data-act="del-row">删除所选</button>`;
+    if (ctx.filterType === '关联货款' && addonMode) return `<button class="btn primary" data-act="add-jc-row">增加一行</button>
+       <button class="btn danger" data-act="del-row">删除所选</button>`;
+    if (ctx.filterType === '关联到款' && addonMode && ctx.subType !== '通用关联')
+      return `<button class="btn primary" data-act="pick-daokuan">增加到款</button>
+       <button class="btn danger" data-act="del-row">删除所选</button>`;
+    return '';
+  })();
 
   $('#detail-footer').innerHTML = `<button class="btn" data-act="exit">退出</button>`
-    + (isEdit ? `<button class="btn primary" data-act="save">保存</button>` : '')
-    + (isUnlock ? `<button class="btn primary" data-act="save-unlock">保存</button>` : '');
+    + (isEdit ? `<button class="btn primary" data-act="save">${actionHintLabel('保存', 'save')}</button>` : '')
+    + (isUnlock ? `<button class="btn primary" data-act="save-unlock">${actionHintLabel('保存', 'save-unlock')}</button>` : '');
 }
 
 function renderEditTable() {
   const isFl = ctx.filterType === '关联返利';
-  const rows = ctx.rows.filter(r => r.correlationType === ctx.filterType);
-  const cols = [isFl ? '<input type="checkbox" class="check-all">' : '', ...commonCols(true), ...(isFl
-    ? ['返利编码', '返利名称', '已上账金额', '剩余可关联金额', '本次关联金额']
-    : ['到款ID', '挑款金额', '关联金额'])];
-  $('#detail-thead').innerHTML = `<tr>${cols.map(c => `<th>${c.startsWith('<input') ? c : th(c)}</th>`).join('')}</tr>`;
+  const isJc = ctx.filterType === '关联货款' && addonMode;
+  const isDkSpecial = ctx.filterType === '关联到款' && addonMode && ctx.subType !== '通用关联';
+  const rows = isJc
+    ? ctx.rows.filter(r => r.correlationType === '关联货款')
+    : ctx.filterType === '关联到款'
+      ? ctx.rows.filter(r => r.correlationType === '关联到款' && (addonMode ? (r.subType || '通用关联') === ctx.subType : true))
+      : ctx.rows.filter(r => r.correlationType === ctx.filterType);
+
+  let cols;
+  if (isFl) cols = ['<input type="checkbox" class="check-all">', ...commonCols(true), '返利编码', '返利名称', '已上账金额', '剩余可关联金额', '本次关联金额'];
+  else if (isJc) cols = ['<input type="checkbox" class="check-all">', ...commonCols(true), '杂入单编号', '关联金额'];
+  else if (isDkSpecial) cols = ['<input type="checkbox" class="check-all">', ...commonCols(true), '到款ID', '挑款总金额', '剩余可用', '关联金额', '来源合同号'];
+  else cols = ['', ...commonCols(true), '到款ID', '挑款金额', '关联金额'];
+  $('#detail-thead').innerHTML = `<tr>${cols.map(thCell).join('')}</tr>`;
 
   if (!rows.length) {
     $('#detail-tbody').innerHTML = `<tr><td class="empty" colspan="${cols.length}">${
-      isFl ? '暂无关联返利数据，请点击左下方「增加一行」新增' : '该合同在到款系统中暂无挑款记录'}</td></tr>`;
+      isFl ? '暂无关联返利数据，请点击左下方「增加一行」新增'
+      : isJc ? '暂无关联货款数据，请点击左下方「增加一行」新增'
+      : isDkSpecial ? '暂无数据，请点击左下方「增加到款」从共享到款池选择'
+      : '该合同在到款系统中暂无挑款记录'}</td></tr>`;
     return;
   }
 
   $('#detail-tbody').innerHTML = rows.map((r, i) => {
-    const head = `<td>${isFl ? `<input type="checkbox" class="row-check" data-uid="${r.uid}">` : ''}</td>`;
+    const checkable = isFl || isJc || isDkSpecial;
+    const head = `<td>${checkable ? `<input type="checkbox" class="row-check" data-uid="${r.uid}">` : ''}</td>`;
     const common = commonCells(i + 1, true, r.correlationType).map(v => `<td title="${esc(v)}">${esc(v)}</td>`).join('');
+
     if (isFl) {
       const st = r.rebateCoding ? rebateStat(r.rebateCoding) : null;
       return `<tr data-uid="${r.uid}">${head}${common}
@@ -405,6 +489,27 @@ function renderEditTable() {
         <td>${r.saved ? fmt(r.theCorrelationAmount)
           : `<input class="amount-input" data-uid="${r.uid}" value="${esc(r.theCorrelationAmount)}">`}</td></tr>`;
     }
+
+    if (isJc) {
+      return `<tr data-uid="${r.uid}">${head}${common}
+        <td>${r.saved ? esc(r.jcNo) : `<input class="jcno-input" data-uid="${r.uid}" value="${esc(r.jcNo || '')}" placeholder="填写杂入单编号">`}</td>
+        <td>${r.saved ? fmt(r.theCorrelationAmount)
+          : `<input class="amount-input" data-uid="${r.uid}" value="${esc(r.theCorrelationAmount)}">`}</td></tr>`;
+    }
+
+    if (isDkSpecial) {
+      const total = (D.sharedDaokuan.find(d => d.daokuanId === r.daokuanId) || {}).totalPickedAmount;
+      const st = sharedDaokuanStat(r.daokuanId);
+      return `<tr data-uid="${r.uid}">${head}${common}
+        <td>${esc(r.daokuanId)}</td>
+        <td>${fmt(total)}</td>
+        <td>${fmt(yuan(st.residue))}</td>
+        <td>${r.saved ? fmt(r.theCorrelationAmount)
+          : `<input class="amount-input" data-uid="${r.uid}" value="${esc(r.theCorrelationAmount)}">`}</td>
+        <td class="col-sticky"><button class="src-link" data-act="view-source" data-contractno="${esc(r.sourceContractNo)}">${esc(r.sourceContractNo)}</button></td></tr>`;
+    }
+
+    // 关联到款 · 通用关联（原有逻辑不变，同合同强绑定）
     return `<tr data-uid="${r.uid}">${head}${common}
       <td>${esc(r.daokuanId)}</td><td>${fmt(r.pickedAmount)}</td>
       <td><input class="amount-input" data-uid="${r.uid}" value="${esc(r.theCorrelationAmount)}"></td></tr>`;
@@ -416,7 +521,7 @@ function renderViewTable() {
     '到款ID', '挑款金额', '关联金额', '是否解锁', '解锁原因', '是否有效'];
   let list = D.correlations.filter(r => r.contractId === ctx.contract.id);
   if (ctx.statusFilter !== '') list = list.filter(r => r.status === Number(ctx.statusFilter));
-  $('#detail-thead').innerHTML = `<tr>${cols.map(c => `<th>${c.startsWith('<input') ? c : th(c)}</th>`).join('')}</tr>`;
+  $('#detail-thead').innerHTML = `<tr>${cols.map(thCell).join('')}</tr>`;
   $('#detail-tbody').innerHTML = list.length ? list.map((r, i) => {
     const isFl = r.correlationType === '关联返利';
     const st = isFl ? rebateStat(r.rebateCoding) : null;
@@ -426,14 +531,14 @@ function renderViewTable() {
       <td>${isFl ? fmt(r.alreadyBillAmount) : '—'}</td><td>${isFl ? fmt(yuan(st.residue)) : '—'}</td>
       <td>${isFl ? '—' : esc(r.daokuanId)}</td><td>${isFl ? '—' : fmt(r.pickedAmount)}</td>
       <td>${fmt(r.theCorrelationAmount)}</td><td>${esc(r.whetherUnlock)}</td>
-      <td>${esc(r.unlockReason || '—')}</td><td>${r.status === 1 ? '有效' : '失效'}</td></tr>`;
+      <td>${esc(r.unlockReason || '—')}</td><td>${r.status === 1 ? '有效' : r.status === 2 ? '审批中' : '失效'}</td></tr>`;
   }).join('') : `<tr><td class="empty" colspan="${cols.length}">暂无数据</td></tr>`;
 }
 
 function renderUnlockTable() {
   const cols = [...commonCols(false), '返利编码', '到款ID', '挑款金额', '关联金额', '是否解锁', '解锁原因'];
   const list = validCorrs(ctx.contract.id);
-  $('#detail-thead').innerHTML = `<tr>${cols.map(c => `<th>${c.startsWith('<input') ? c : th(c)}</th>`).join('')}</tr>`;
+  $('#detail-thead').innerHTML = `<tr>${cols.map(thCell).join('')}</tr>`;
   $('#detail-tbody').innerHTML = list.map((r, i) => {
     const isFl = r.correlationType === '关联返利';
     const common = commonCells(i + 1, false, r.correlationType).map(v => `<td title="${esc(v)}">${esc(v)}</td>`).join('');
@@ -489,7 +594,7 @@ function renderRebateDialog() {
     </div>
     <div class="table-wrap dlg-table"><table>
       <thead><tr><th><input type="checkbox" class="dlg-check-all" ${allChecked ? 'checked' : ''}></th>
-        <th>产品线名称</th><th>核算大类</th><th>${th('返利编码')}</th><th>返利名称</th><th>${th('已上账金额')}</th><th>${th('剩余可关联金额')}</th></tr></thead>
+        <th>产品线名称</th><th>核算大类</th><th>返利编码</th><th>返利名称</th><th>已上账金额</th><th>剩余可关联金额</th></tr></thead>
       <tbody>${list.length ? list.map(b => {
         const st = rebateStat(b.rebateCoding);
         return `<tr><td><input type="checkbox" class="dlg-check" data-coding="${b.rebateCoding}" ${dlg.picked.has(b.rebateCoding) ? 'checked' : ''}></td>
@@ -518,22 +623,105 @@ function syncDlgSelection() {
   if (tip) tip.textContent = tip.textContent.replace(/已选 \d+ 条。$/, `已选 ${dlg.picked.size} 条。`);
 }
 
-function showModal(title, actions) {
+/* ---------------- 增补需求：共享到款选择弹框（跨合同关联/跨客户关联/厂商款补/其他款补共用） ----------------
+ * 4 类特殊场景本质都是「从共享到款池挑一笔到款关联到当前合同」，只是默认筛选范围不同：
+ * 跨合同关联默认按当前合同客户筛，其余 3 类不设默认范围，全局搜。选中后统一写入 ctx.rows，
+ * 等保存时按 subType 分流进「审批中」，不在这一步立即生效。 */
+let dkdlg = { uid: null, subType: '', query: {}, picked: new Set(), page: 1, pageSize: 10 };
+
+function openDaokuanDialog(subType) {
+  dkdlg = {
+    subType: subType,
+    query: { customer: subType === '跨合同关联' ? ctx.contract.customer : '', daokuanId: '', min: '', max: '' },
+    picked: new Set(), page: 1, pageSize: 10
+  };
+  renderDaokuanDialog();
+  const titleMap = { '跨合同关联': '选择共享到款（跨合同关联 · 同客户）', '跨客户关联': '选择共享到款（跨客户关联）',
+    '厂商款补': '选择共享到款（厂商款补）', '其他款补': '选择共享到款（其他款补）' };
+  showModal(titleMap[subType] || '选择共享到款', [['取消', 'modal-cancel'], ['确定', 'dkdlg-confirm']]);
+}
+
+function daokuanCandidates() {
+  return D.sharedDaokuan.filter(d => {
+    const st = sharedDaokuanStat(d.daokuanId);
+    if (st.residue <= 0) return false;
+    if (!like(d.customer, dkdlg.query.customer)) return false;
+    if (!like(d.daokuanId, dkdlg.query.daokuanId)) return false;
+    if (dkdlg.query.min !== '' && st.residue < cents(dkdlg.query.min)) return false;
+    if (dkdlg.query.max !== '' && st.residue > cents(dkdlg.query.max)) return false;
+    return true;
+  });
+}
+
+function renderDaokuanDialog() {
+  const all = daokuanCandidates();
+  const pages = Math.max(1, Math.ceil(all.length / dkdlg.pageSize));
+  if (dkdlg.page > pages) dkdlg.page = pages;
+  const list = all.slice((dkdlg.page - 1) * dkdlg.pageSize, dkdlg.page * dkdlg.pageSize);
+  const allChecked = list.length && list.every(d => dkdlg.picked.has(d.daokuanId));
+
+  $('#modal-body').innerHTML = `
+    <div class="dlg-filters">
+      <div class="field"><label>客户名称</label><input id="dk-customer" value="${esc(dkdlg.query.customer)}" ${dkdlg.subType === '跨合同关联' ? 'readonly title="跨合同关联固定按当前合同客户筛选，不可修改；要换客户请改用「跨客户关联」"' : ''}></div>
+      <div class="field"><label>到款ID</label><input id="dk-id" value="${esc(dkdlg.query.daokuanId)}"></div>
+      <div class="field range"><label>剩余可用金额:</label>
+        <input id="dk-min" placeholder="请输入最小金额" value="${esc(dkdlg.query.min)}"><span class="sep">-</span>
+        <input id="dk-max" placeholder="请输入最大金额" value="${esc(dkdlg.query.max)}"></div>
+      <div class="field ck-line"><button class="btn primary" data-act="dkdlg-query">查询</button></div>
+    </div>
+    <div class="table-wrap dlg-table"><table>
+      <thead><tr><th><input type="checkbox" class="dkdlg-check-all" ${allChecked ? 'checked' : ''}></th>
+        <th>到款ID</th><th>来源合同号</th><th>客户名称</th><th>挑款总金额</th><th>剩余可用</th></tr></thead>
+      <tbody>${list.length ? list.map(d => {
+        const st = sharedDaokuanStat(d.daokuanId);
+        return `<tr><td><input type="checkbox" class="dkdlg-check" data-id="${esc(d.daokuanId)}" ${dkdlg.picked.has(d.daokuanId) ? 'checked' : ''}></td>
+          <td>${esc(d.daokuanId)}</td><td>${esc(d.contractNo)}</td><td>${esc(d.customer)}</td>
+          <td>${fmt(d.totalPickedAmount)}</td><td>${fmt(yuan(st.residue))}</td></tr>`;
+      }).join('') : '<tr><td class="empty" colspan="6">暂无数据</td></tr>'}</tbody>
+    </table></div>
+    <div class="pager dlg-pager">
+      <span>共 ${all.length} 条</span>
+      <select><option>10条/页</option><option>20条/页</option></select>
+      <button data-act="dkdlg-page" data-p="${dkdlg.page - 1}" ${dkdlg.page === 1 ? 'disabled' : ''}>‹</button>
+      ${Array.from({ length: pages }, (_, i) => i + 1).map(n =>
+        `<button class="${n === dkdlg.page ? 'page-on' : ''}" data-act="dkdlg-page" data-p="${n}">${n}</button>`).join('')}
+      <button data-act="dkdlg-page" data-p="${dkdlg.page + 1}" ${dkdlg.page === pages ? 'disabled' : ''}>›</button>
+      <span>前往</span><input value="${dkdlg.page}" readonly><span>页</span>
+    </div>
+    <div class="dkdlg-tip">${dkdlg.subType === '跨合同关联'
+      ? '客户名称固定为当前合同客户，不可修改，只在同客户范围内挑到款；'
+      : dkdlg.subType === '跨客户关联'
+      ? '客户名称不设默认值，可按任意客户名称搜索；'
+      : '以到款ID为主搜索维度，全局搜索，不限客户不限合同；'}挑款总金额是跨合同共享额度，剩余可用 = 总额 − 全部合同已占用（含审批中）。已选 ${dkdlg.picked.size} 条。</div>`;
+}
+
+function syncDkdlgSelection() {
+  const boxes = $$('#modal-body .dkdlg-check');
+  const all = $('#modal-body .dkdlg-check-all');
+  if (all) all.checked = boxes.length > 0 && boxes.every(x => x.checked);
+  const tip = $('#modal-body .dkdlg-tip');
+  if (tip) tip.textContent = tip.textContent.replace(/已选 \d+ 条。$/, `已选 ${dkdlg.picked.size} 条。`);
+}
+
+// variant 为 'tools' 时把面板加宽给演示工具用；仍是带遮罩的居中弹窗，不是全屏页面
+function showModal(title, actions, variant) {
   $('#modal-title').textContent = title;
   $('#modal-actions').innerHTML = actions.map(a =>
     `<button class="btn ${a[1] === 'modal-cancel' ? '' : 'primary'}" data-act="${a[1]}">${a[0]}</button>`).join('');
   $('#modal').classList.add('open');
+  $('#modal').classList.toggle('tools', variant === 'tools');
   $('#modal').setAttribute('aria-hidden', 'false');
 }
 function closeModal() {
-  $('#modal').classList.remove('open');
+  $('#modal').classList.remove('open', 'tools');
   $('#modal').setAttribute('aria-hidden', 'true');
 }
 
 /* ---------------- 保存校验（方案 3.2.4.5） ---------------- */
 function validateSave() {
-  const fl = ctx.rows.filter(r => r.correlationType === '关联返利');
-  const dk = ctx.rows.filter(r => r.correlationType === '关联到款');
+  const normal = partitionRows().normal;
+  const fl = normal.filter(r => r.correlationType === '关联返利');
+  const dk = normal.filter(r => r.correlationType === '关联到款');
 
   for (let i = 0; i < fl.length; i++) {
     const r = fl[i];
@@ -572,25 +760,72 @@ function validateSave() {
     if (pick && dkTotal[id] > cents(pick.pickedAmount))
       return `到款ID ${id} 在本合同下关联金额合计 ${fmt(yuan(dkTotal[id]))}，大于挑款金额 ${fmt(pick.pickedAmount)}`;
   }
+  // 合同额度校验：不管普通还是特殊（含关联货款），都要计入同一个「预计返利金额」额度
   const all = sumCents(ctx.rows, r => r.theCorrelationAmount);
   if (all > cents(ctx.contract.totalRebate))
-    return `关联返利与关联到款合计 ${fmt(yuan(all))}，大于预计返利金额 ${fmt(ctx.contract.totalRebate)}`;
+    return `本次关联合计 ${fmt(yuan(all))}，大于预计返利金额 ${fmt(ctx.contract.totalRebate)}`;
+  return null;
+}
+
+// 增补需求：把 ctx.rows 拆成「普通」（关联返利 + 通用关联到款，立即生效）和「特殊」（4 类特殊到款 + 关联货款，需走提审）
+function partitionRows() {
+  const normal = [], special = [];
+  ctx.rows.forEach(r => {
+    if (r.correlationType === '关联返利') { normal.push(r); return; }
+    if (r.correlationType === '关联到款') {
+      const isSpecial = addonMode && SPECIAL_DK_SUBTYPES.includes(r.subType);
+      (isSpecial ? special : normal).push(r);
+      return;
+    }
+    if (r.correlationType === '关联货款') { special.push(r); }
+  });
+  return { normal: normal, special: special };
+}
+
+// 特殊场景校验：关联金额必须 > 0；到款类还要卡共享到款池剩余可用；关联货款只校验杂入单是否真实存在，不做金额校验
+function validateSpecialRows(special) {
+  for (let i = 0; i < special.length; i++) {
+    const r = special[i];
+    if (r.saved) continue;
+    if (r.correlationType === '关联货款') {
+      if (!r.jcNo) return `关联货款：第${i + 1}行请填写杂入单编号`;
+      if (!D.jcOrders.includes(r.jcNo)) return `关联货款：杂入单编号 ${r.jcNo} 不存在，请核实后重新填写（调用外部系统接口校验）`;
+      if (!amountOk(r.theCorrelationAmount) || cents(r.theCorrelationAmount) <= 0)
+        return `关联货款：第${i + 1}行关联金额必须大于 0，且最多两位小数`;
+    } else {
+      if (!amountOk(r.theCorrelationAmount) || cents(r.theCorrelationAmount) <= 0)
+        return `${r.subType}：第${i + 1}行关联金额必须大于 0，且最多两位小数`;
+    }
+  }
+  const byDk = {};
+  special.filter(r => r.correlationType === '关联到款' && !r.saved).forEach(r => {
+    byDk[r.daokuanId] = (byDk[r.daokuanId] || 0) + cents(r.theCorrelationAmount);
+  });
+  for (const id in byDk) {
+    const st = sharedDaokuanStat(id);
+    if (byDk[id] > st.residue)
+      return `到款ID ${id} 本次关联金额合计 ${fmt(yuan(byDk[id]))}，大于剩余可用金额 ${fmt(yuan(st.residue))}`;
+  }
   return null;
 }
 
 function doSave() {
   const err = validateSave();
   if (err) { toast(err, 'error'); return; }
+  const { normal, special } = partitionRows();
+  const err2 = validateSpecialRows(special);
+  if (err2) { toast(err2, 'error'); return; }
+
   const today = new Date().toISOString().slice(0, 10);
-  ctx.rows.filter(r => r.correlationType === '关联返利' && !r.saved && r.rebateCoding).forEach(r => {
+  normal.filter(r => r.correlationType === '关联返利' && !r.saved && r.rebateCoding).forEach(r => {
     D.correlations.push({
       id: 'R' + nextUid(), contractId: ctx.contract.id, correlationType: '关联返利', correlationDate: today,
       rebateCoding: r.rebateCoding, rebateName: r.rebateName, alreadyBillAmount: r.alreadyBillAmount,
       theCorrelationAmount: Number(r.theCorrelationAmount), status: 1, whetherUnlock: '否', unlockReason: ''
     });
   });
-  ctx.rows.filter(r => r.correlationType === '关联到款').forEach(r => {
-    const old = validCorrs(ctx.contract.id).find(c => c.correlationType === '关联到款' && c.daokuanId === r.daokuanId);
+  normal.filter(r => r.correlationType === '关联到款').forEach(r => {
+    const old = validCorrs(ctx.contract.id).find(c => c.correlationType === '关联到款' && (!c.subType || c.subType === '通用关联') && c.daokuanId === r.daokuanId);
     const v = cents(r.theCorrelationAmount);
     if (old && cents(old.theCorrelationAmount) === v) return;
     if (old) { old.status = 0; old.unlockReason = '到款关联金额调整'; }
@@ -602,9 +837,100 @@ function doSave() {
       });
     }
   });
+
+  const pendingSpecial = special.filter(r => !r.saved);
+  ctx.rows = buildEditRows(ctx.contract);   // 刷新本地状态：普通行已落库，避免残留未保存标记导致重复提交
+  renderDetail();
+
+  if (pendingSpecial.length) {
+    openReviewModal(pendingSpecial);
+    toast('普通关联已保存生效；特殊场景需提审，请在弹窗中上传凭证、填写原因');
+    return; // 留在编辑页，等提审完成或取消后再退出
+  }
+
   const remain = contractRebateCents(ctx.contract);
   toast(remain === 0 ? '保存成功，合同剩余返利金额为 0，已移入已关联返利合同'
     : `保存成功，合同剩余返利金额 ${fmt(yuan(remain))}，仍停留在待关联`);
+  backToList();
+}
+
+/* ---------------- 增补需求：保存后分组提审页面 ----------------
+ * 按「产品线 + 二级关联类型 / 关联货款」分组（单次编辑产品线恒定，等价按类型分组）；
+ * 每组独立上传凭证 + 填关联原因，全部填完才能提交；提交后各组各自生成 submissionId（各自一张审批单）。 */
+let reviewState = null;
+const reviewGroupKey = r => r.correlationType === '关联货款' ? '关联货款' : `关联到款-${r.subType}`;
+
+function openReviewModal(rows) {
+  const groups = {};
+  rows.forEach(r => {
+    const k = reviewGroupKey(r);
+    (groups[k] = groups[k] || { key: k, rows: [], reason: '', fileName: '', showDetail: false }).rows.push(r);
+  });
+  reviewState = { groups: groups };
+  renderReviewModal();
+  showModal('提交审批（按产品线 + 关联类型分组）', [['稍后再传', 'modal-cancel'], ['提交审批', 'submit-review']], 'tools');
+}
+
+function renderReviewModal() {
+  const groups = Object.values(reviewState.groups);
+  $('#modal-body').innerHTML = `
+    <p class="tool-notice">当前合同产品线「${esc(ctx.contract.productLine)}」；下面按「产品线 + 关联类型」自动分组，每组独立上传一次凭证、填一次关联原因，全部分组都填完才能提交审批。提交后占用共享到款 / 合同剩余返利金额，驳回会释放回去。</p>
+    ${groups.map(g => {
+      const total = sumCents(g.rows, r => r.theCorrelationAmount);
+      return `<div class="review-group" data-gkey="${esc(g.key)}">
+        <div class="review-group-head"><b>${esc(g.key)}</b>
+          <span class="tag">产品线：${esc(ctx.contract.productLine)}</span>
+          <span class="tag">共 ${g.rows.length} 条，合计 ${fmt(yuan(total))}</span></div>
+        <div class="review-group-body">
+          <div class="review-group-row">
+            <button class="btn" data-act="review-detail" data-gkey="${esc(g.key)}">${g.showDetail ? '收起明细' : `查看明细（${g.rows.length} 条）`}</button>
+            <span class="review-file-tag">${g.fileName ? `📎 ${esc(g.fileName)}` : '尚未上传凭证'}</span>
+            <button class="btn" data-act="review-upload" data-gkey="${esc(g.key)}">上传凭证（zip，原型模拟）</button>
+          </div>
+          ${g.showDetail ? `<div class="table-wrap dlg-table"><table>
+            <thead><tr><th>合同号</th><th>客户名称</th><th>到款ID / 杂入单号</th><th>关联金额</th></tr></thead>
+            <tbody>${g.rows.map(r => `<tr>
+              <td>${esc(r.correlationType === '关联货款' ? ctx.contract.contractNo : (r.sourceContractNo || ctx.contract.contractNo))}</td>
+              <td>${esc(r.correlationType === '关联货款' ? ctx.contract.customer : (r.sourceCustomer || ctx.contract.customer))}</td>
+              <td>${esc(r.daokuanId || r.jcNo || '—')}</td>
+              <td>${fmt(r.theCorrelationAmount)}</td></tr>`).join('')}</tbody>
+          </table></div>` : ''}
+          <div class="review-group-row">
+            <label>关联原因</label>
+            <textarea data-act="review-reason" data-gkey="${esc(g.key)}" placeholder="必填，自由文本">${esc(g.reason)}</textarea>
+          </div>
+        </div>
+      </div>`;
+    }).join('')}`;
+}
+
+function submitApproval() {
+  const groups = Object.values(reviewState.groups);
+  const missing = groups.find(g => !g.reason.trim() || !g.fileName);
+  if (missing) { toast(`「${missing.key}」还没填关联原因或上传凭证`, 'error'); return; }
+
+  const today = new Date().toISOString().slice(0, 10);
+  let totalRows = 0;
+  groups.forEach(g => {
+    const submissionId = 'SUB' + nextUid();   // 每组各自一张审批单
+    g.rows.forEach(r => {
+      const base = {
+        id: 'R' + nextUid(), contractId: ctx.contract.id, correlationDate: today, status: 2,
+        whetherUnlock: '否', unlockReason: '', submissionId: submissionId, groupKey: g.key,
+        reviewReason: g.reason, evidenceFile: g.fileName
+      };
+      D.correlations.push(r.correlationType === '关联货款'
+        ? Object.assign(base, { correlationType: '关联货款', jcNo: r.jcNo, theCorrelationAmount: Number(r.theCorrelationAmount) })
+        : Object.assign(base, {
+            correlationType: '关联到款', subType: r.subType, daokuanId: r.daokuanId, pickedAmount: r.pickedAmount,
+            sourceContractNo: r.sourceContractNo, sourceCustomer: r.sourceCustomer, theCorrelationAmount: Number(r.theCorrelationAmount)
+          }));
+      totalRows++;
+    });
+  });
+  reviewState = null;
+  closeModal();
+  toast(`已提交审批，共 ${groups.length} 组、${totalRows} 条记录，通过前占用共享到款 / 合同剩余返利金额`);
   backToList();
 }
 
@@ -713,7 +1039,10 @@ function runImport(rows) {
     const c = D.contracts.find(x => x.contractNo === r.contractNo && x.accountCate === r.accountCate && x.currency === r.currency);
     if (!c) { errors.push(`第 ${line} 行：合同 ${r.contractNo} 下不存在核算大类 ${r.accountCate} 与币种 ${r.currency} 的组合`); return; }
     if (!['关联返利', '关联到款'].includes(r.type)) { errors.push(`第 ${line} 行：关联方式填写不正确`); return; }
-    if (!amountOk(r.amount)) { errors.push(`第 ${line} 行：本次关联金额最多保留两位小数`); return; }
+    // 金额精度：批量导入超两位小数四舍五入保留两位，不报错（与编辑页手工填写不同，方案 3.2.2.4）
+    if (r.amount === '' || r.amount == null || isNaN(Number(r.amount)) || Number(r.amount) < 0) {
+      errors.push(`第 ${line} 行：本次关联金额不允许负数或格式不正确`); return;
+    }
     if (r.type === '关联返利') {
       const b = D.rebateBase.find(x => x.rebateCoding === r.rebateCoding);
       if (!b) { errors.push(`第 ${line} 行：无法在返利底表查询到返利编码 ${r.rebateCoding}`); return; }
@@ -724,7 +1053,7 @@ function runImport(rows) {
       const pick = D.daokuanPicks.find(p => p.contractNo === r.contractNo && p.daokuanId === r.daokuanId);
       if (!pick) { errors.push(`第 ${line} 行：到款ID ${r.daokuanId} 未关联该合同号`); return; }
     }
-    parsed.push({ line: line, row: r, contract: c });
+    parsed.push({ line: line, row: { ...r, amount: round2(r.amount) }, contract: c });
   });
   if (errors.length) return { errors: errors, logs: [] };
 
@@ -808,11 +1137,11 @@ function runImport(rows) {
 
 /* ================= PRD 说明抽屉 ================= */
 const DRAWER_TABS = [
-  ['flow', '流转与时间轴'],
-  ['notes', '补充说明'],
+  ['flow', '业务流程图'],
+  ['quick', '方案快速说明'],
   ['versions', '版本变化'],
-  ['tools', '演示工具'],
-  ['links', '相关链接']
+  ['links', '相关链接'],
+  ['notes', '补充说明']
 ];
 let drawerTab = 'flow';
 
@@ -890,9 +1219,28 @@ function renderDrawer() {
 
   if (drawerTab === 'flow') {
     html = `<h3>合同状态流转</h3>${SVG_FLOW}
-      <p class="prd-p">保存后重算合同剩余返利金额：大于 0 仍停留在待关联，等于 0 移入已关联。已关联需调整时由采购经理按单条记录解锁；外部数据变动导致剩余金额大于 0 时自动回到待关联，无需解锁。</p>
+      <p class="prd-p">保存后重算合同剩余返利金额：大于 0 仍停留在待关联，等于 0 移入已关联。已关联需调整时由采购经理按单条记录解锁；外部数据变动导致剩余金额大于 0 时自动回到待关联。</p>
       <h3>预警邮件推送时间轴</h3>${SVG_TIMELINE}
-      <p class="prd-p">收件人为产品专员、预计返利运营总、预计返利采购；升级阶段加送事业部总。<span class="warn">现有代码第三阶段为到期后 4–8 周，与上图 5–7 周不一致，见待办清单 BUG-08。</span></p>`;
+      <p class="prd-p">收件人为产品专员、预计返利运营总、预计返利采购；升级阶段加送事业部总。</p>`;
+  }
+
+  if (drawerTab === 'quick') {
+    // 方案快速说明：分组维护原型上不容易直接看出的规则；支持分组锚点与表格列宽调整
+    const Q = P.quick;
+    html = `<p class="prd-p">${esc(Q.intro)}</p>
+      <div class="prd-anchor">${Q.sections.map((s, i) =>
+        `<button data-anchor="quick-sec-${i}">${esc(s.title)}</button>`).join('')}</div>
+      ${Q.sections.map((s, i) => `<section class="prd-sec" id="quick-sec-${i}">
+        <h3>${esc(s.title)}</h3>
+        ${s.intro ? `<p class="prd-p">${esc(s.intro)}</p>` : ''}
+        ${s.type === 'table'
+          ? `<div class="prd-table-wrap"><table class="prd-table" data-resizable-table>
+               <colgroup>${s.columns.map(() => '<col>').join('')}</colgroup>
+               <thead><tr>${s.columns.map((c, col) => `<th><span>${esc(c)}</span><button class="prd-col-resizer" data-col="${col}" aria-label="调整${esc(c)}列宽，使用左右方向键微调" title="拖动调整列宽，方向键微调"></button></th>`).join('')}</tr></thead>
+               <tbody>${s.rows.map(r => `<tr>${r.map(v => `<td>${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody>
+             </table></div>`
+          : `<ul class="prd-list">${s.rows.map(r => `<li>${esc(r)}</li>`).join('')}</ul>`}
+      </section>`).join('')}`;
   }
 
   if (drawerTab === 'notes') {
@@ -901,7 +1249,7 @@ function renderDrawer() {
   }
 
   if (drawerTab === 'versions') {
-    html = `<div class="ver-legend">
+    html = P.versions.length ? `<div class="ver-legend">
         <span class="tag-type add">新增</span><span class="tag-type mod">修改</span><span class="tag-type del">删除</span>
         <span class="tag-st done">已开发</span><span class="tag-st todo">待开发</span></div>
       ${P.versions.map(v => `<div class="ver-block">
@@ -910,23 +1258,8 @@ function renderDrawer() {
           <span class="tag-type ${it.type === '新增' ? 'add' : it.type === '删除' ? 'del' : 'mod'}">${esc(it.type)}</span>
           <span class="ver-text">${esc(it.text)}</span>
           <span class="tag-st ${it.status === '已开发' ? 'done' : 'todo'}">${esc(it.status)}</span>
-          <span class="ver-by">提出：${esc(it.by)}</span></li>`).join('')}</ul></div>`).join('')}`;
-  }
-
-  if (drawerTab === 'tools') {
-    html = `<p class="prd-p warn">以下按钮仅用于评审演示，不是系统功能，开发无需实现。点击后会直接修改当前演示数据。</p>
-      <div class="tool-grid">
-        <button class="btn primary" data-sim="rebate">模拟返利变更</button>
-        <button class="btn primary" data-sim="daokuan">模拟挑款金额变化</button>
-        <button class="btn primary" data-sim="shrink">模拟合同金额变小</button>
-        <button class="btn danger" data-sim="terminate">模拟合同终止</button>
-      </div>
-      <div class="tool-desc">
-        <p><b>模拟返利变更</b>：返利编码 639724 发生调整，其上所有合同关联失效并释放，受影响合同自动回到待关联。</p>
-        <p><b>模拟挑款金额变化</b>：到款 DK20260812007 挑款金额由 20000 变为 15000，仅该到款的关联失效，同合同的返利关联不受影响。</p>
-        <p><b>模拟合同金额变小</b>：ZZWHF26070219 预计返利金额由 31908 改为 20000，该合同下全部关联失效。</p>
-        <p><b>模拟合同终止</b>：ZZSHF25010022 终止，释放全部关联，合同对用户不再可见。</p>
-      </div>`;
+          <span class="ver-by">提出：${esc(it.by)}</span></li>`).join('')}</ul></div>`).join('')}`
+      : `<p class="prd-p">本栏记录整体方案的版本变化，暂无记录。</p>`;
   }
 
   if (drawerTab === 'links') {
@@ -936,6 +1269,93 @@ function renderDrawer() {
         : `<li><span class="muted">${esc(l.label)}（待补充链接）</span></li>`).join('')}</ul>`;
   }
   $('#drawer-body').innerHTML = html;
+}
+
+/* -------- 演示数据快照：供「还原演示数据」使用 -------- */
+const DEMO_SNAPSHOT = JSON.parse(JSON.stringify({
+  contracts: D.contracts, correlations: D.correlations, rebateBase: D.rebateBase, daokuanPicks: D.daokuanPicks
+}));
+function resetDemoData() {
+  Object.keys(DEMO_SNAPSHOT).forEach(k => {
+    D[k].length = 0;
+    D[k].push(...JSON.parse(JSON.stringify(DEMO_SNAPSHOT[k])));
+  });
+}
+
+/* -------- 演示工具（顶栏入口，仅开发模式可见；非系统功能） -------- */
+function openToolsModal() {
+  const contractNos = uniq(D.contracts.filter(c => !c.terminated), 'contractNo');
+  const defNo = contractNos.includes('ZZWHF26070219') ? 'ZZWHF26070219' : contractNos[0];
+  const opts = arr => arr.map(v => `<option value="${esc(v)}" ${v === defNo ? 'selected' : ''}>${esc(v)}</option>`).join('');
+  const subs = pendingSubmissions();
+
+  $('#modal-body').innerHTML = `
+    <div class="tool-wrap">
+      <p class="tool-notice">以下按钮仅用于评审演示，不是系统功能，开发无需实现。点击后会直接修改当前演示数据，可用「还原演示数据」恢复初始状态。</p>
+
+      <div class="tool-sec">
+        <h3>模拟返利变更</h3>
+        <div class="tool-grid">
+          <p class="tool-help flat">返利 639724 发生调整：该返利ID关联的合同明细行全部失效并释放，受影响合同自动回到待关联。</p>
+          <div class="tool-right"><button class="tool-btn" data-sim="rebate">执行</button></div>
+        </div>
+      </div>
+
+      <div class="tool-sec">
+        <h3>模拟挑款金额变化</h3>
+        <div class="tool-row">
+          <div class="tool-label">新挑款金额</div>
+          <input class="tool-input" id="sim-daokuan-amt" placeholder="如 8000；填 0 表示归零">
+          <button class="tool-btn" data-sim="daokuan" data-daokuan="12345">到款 12345 变化</button>
+          <button class="tool-btn" data-sim="daokuan" data-daokuan="54321">到款 54321 变化</button>
+        </div>
+        <p class="tool-help">金额可变大、变小或归零（到款系统释放挑款）：仅该到款ID关联的合同明细行失效，同合同的返利关联、以及其他已关联的到款ID明细行不受影响。</p>
+      </div>
+
+      <div class="tool-sec">
+        <h3>模拟合同变更</h3>
+        <div class="tool-row">
+          <div class="tool-label">合同号</div>
+          <select class="tool-select" id="sim-contract">${opts(contractNos)}</select>
+          <button class="tool-btn" data-sim="contract" data-case="keep">不释放</button>
+          <button class="tool-btn" data-sim="contract" data-case="release">释放</button>
+        </div>
+        <p class="tool-help">不释放：预计返利金额增大、基础数据变更；释放：预计返利金额减小、返利行新增或删除（合同终止见下方，同样释放）。</p>
+      </div>
+
+      <div class="tool-sec">
+        <h3>模拟合同终止</h3>
+        <div class="tool-row">
+          <div class="tool-label">合同号</div>
+          <select class="tool-select" id="sim-term">${opts(contractNos)}</select>
+          <button class="tool-btn" data-sim="terminate">执行</button>
+        </div>
+        <p class="tool-help">释放全部关联，合同对用户不再可见。</p>
+      </div>
+
+      <div class="tool-sec">
+        <h3>还原演示数据</h3>
+        <div class="tool-grid">
+          <p class="tool-help flat">把合同、关联记录、返利底表与挑款关系恢复为原型初始数据，用于反复演示。</p>
+          <div class="tool-right"><button class="tool-btn" data-sim="reset">还原到初始状态</button></div>
+        </div>
+      </div>
+
+      <div class="tool-sec">
+        <h3>模拟审批（增补需求，2026-09-10）</h3>
+        ${subs.length ? `<div class="tool-row">
+            <div class="tool-label">待审批分组</div>
+            <select class="tool-select" id="sim-submission">${subs.map(s =>
+              `<option value="${esc(s.id)}">${esc(s.groupKey)}（${s.rows.length} 条，合计 ${fmt(yuan(sumCents(s.rows, r => r.theCorrelationAmount)))}）</option>`).join('')}</select>
+            <button class="tool-btn" data-sim="approve">通过</button>
+            <button class="tool-btn" data-sim="reject">驳回</button>
+          </div>
+          <p class="tool-help">通过：status 由 2（审批中）变为 1（有效），正常计入已关联；驳回：status 变为 0（失效），占用的共享到款 / 杂入单额度释放回池子。审批人、审批链由其他平台配置，这里只模拟结果。</p>`
+          : `<p class="tool-help flat">当前没有审批中的分组。先在待关联合同编辑页发起一笔跨合同 / 跨客户 / 厂商款补 / 其他款补 / 关联货款，保存后按提示提交审批，再回到这里模拟。</p>`}
+      </div>
+    </div>`;
+  // 弹窗（不是全屏）：沿用示例图的分区与控件规格，面板加宽到 1120px，右上角 × 与底部「关闭」都能关闭
+  showModal('演示工具（评审演示用，非系统功能）', [['关闭', 'modal-cancel']], 'tools');
 }
 
 /* -------- 演示：模拟外部数据变动 -------- */
@@ -954,37 +1374,113 @@ function releaseAndMail(list, reason, extra) {
   openMailModal('合同自动释放返利/到款通知', reason, mails);
 }
 
-function simulate(kind) {
+// 增补需求：按 submissionId 汇总当前所有「审批中」分组，供演示工具模拟通过/驳回
+function pendingSubmissions() {
+  const map = {};
+  D.correlations.filter(c => c.status === 2 && c.submissionId).forEach(c => {
+    (map[c.submissionId] = map[c.submissionId] || { id: c.submissionId, groupKey: c.groupKey, rows: [] }).rows.push(c);
+  });
+  return Object.values(map);
+}
+
+const simVal = id => { const el = $('#' + id); return el ? el.value.trim() : ''; };
+
+function simulate(kind, data = {}) {
+  if (kind === 'reset') {
+    resetDemoData(); closeModal(); ctx = null; renderList();
+    toast('演示数据已还原为初始状态');
+    return;
+  }
+
+  if (kind === 'approve' || kind === 'reject') {
+    const id = simVal('sim-submission');
+    const list = D.correlations.filter(c => c.submissionId === id && c.status === 2);
+    if (!list.length) { toast('请先选择待审批分组', 'error'); return; }
+    list.forEach(c => {
+      c.status = kind === 'approve' ? 1 : 0;
+      if (kind === 'reject') { c.whetherUnlock = '是'; c.unlockReason = '审批驳回'; }
+    });
+    closeModal(); ctx = null; renderList();
+    toast(kind === 'approve'
+      ? `已通过 ${list.length} 条记录（${list[0].groupKey}），计入已关联返利明细`
+      : `已驳回 ${list.length} 条记录（${list[0].groupKey}），占用的额度已释放回共享池`);
+    return;
+  }
+
   if (kind === 'rebate') {
     const list = D.correlations.filter(c => c.status === 1 && c.rebateCoding === '639724');
     if (!list.length) { toast('返利 639724 当前没有有效关联，可先做一笔关联再试', 'error'); return; }
     releaseAndMail(list, '返利数据调整');
   }
+
   if (kind === 'daokuan') {
-    const list = D.correlations.filter(c => c.status === 1 && c.daokuanId === 'DK20260812007');
-    if (!list.length) { toast('到款 DK20260812007 当前没有有效关联', 'error'); return; }
-    releaseAndMail(list, '挑款金额变更', () => {
-      const pick = D.daokuanPicks.find(p => p.daokuanId === 'DK20260812007');
-      if (pick) pick.pickedAmount = 15000;
-      const c = D.contracts.find(x => x.contractNo === 'ZZWHF26070219');
-      D.correlations.push({
-        id: 'R' + nextUid(), contractId: c.id, correlationType: '关联到款',
-        correlationDate: new Date().toISOString().slice(0, 10), daokuanId: 'DK20260812007',
-        pickedAmount: 15000, theCorrelationAmount: 0, status: 1, whetherUnlock: '否', unlockReason: ''
-      });
-    });
+    const id = data.daokuan, amount = simVal('sim-daokuan-amt');
+    const pick = D.daokuanPicks.find(p => p.daokuanId === id);
+    if (!pick) { toast('请先选择到款ID', 'error'); return; }
+    if (!amountOk(amount)) { toast('请输入不小于 0 且最多两位小数的挑款金额', 'error'); return; }
+    const next = Number(amount);
+    const list = D.correlations.filter(c => c.status === 1 && c.daokuanId === id);
+    const apply = () => {
+      // 同一到款ID可能落在同合同的多个合同行上，挑款金额按到款ID统一更新；金额可变大、变小或归零
+      const picks = D.daokuanPicks.filter(p => p.daokuanId === id);
+      picks.forEach(p => { p.pickedAmount = next; });
+      if (next > 0) {
+        [...new Set(picks.map(p => p.contractNo))].forEach(no => {
+          const c = D.contracts.find(x => x.contractNo === no);
+          if (c) D.correlations.push({
+            id: 'R' + nextUid(), contractId: c.id, correlationType: '关联到款',
+            correlationDate: new Date().toISOString().slice(0, 10), daokuanId: id,
+            pickedAmount: next, theCorrelationAmount: 0, status: 1, whetherUnlock: '否', unlockReason: ''
+          });
+        });
+      }
+    };
+    if (!list.length) {
+      apply(); closeModal(); ctx = null; renderList();
+      toast(`到款 ${id} 挑款金额已改为 ${fmt(next)}，当前没有有效关联需要释放`);
+      return;
+    }
+    releaseAndMail(list, '挑款金额变更', apply);
   }
-  if (kind === 'shrink') {
-    const c = D.contracts.find(x => x.contractNo === 'ZZWHF26070219');
+  if (kind === 'contract') {
+    const no = simVal('sim-contract');
+    const c = D.contracts.find(x => x.contractNo === no);
+    if (!c) { toast('请先选择合同号', 'error'); return; }
+    const cur = Number(c.totalRebate);
+
+    if (data.case !== 'release') {                   // 不释放：金额增大 / 基础数据变更
+      const next = Number((cur * 2).toFixed(2));
+      c.totalRebate = next;
+      closeModal(); ctx = null; renderList();
+      toast(`合同 ${no}：预计返利金额 ${fmt(cur)} → ${fmt(next)}（等同金额增大 / 基础数据变更），按方案不释放已有联`);
+      return;
+    }
+
+    // 释放：金额减小（等同返利行新增 / 删除）
+    const next = Number((cur / 2).toFixed(2));
     const list = validCorrs(c.id);
-    if (!list.length) { toast('该合同当前没有有效关联', 'error'); return; }
-    releaseAndMail(list, '合同变更：预计返利金额变小', () => { c.totalRebate = 20000; });
+    if (!list.length) {
+      c.totalRebate = next; closeModal(); ctx = null; renderList();
+      toast(`合同 ${no}：预计返利金额 ${fmt(cur)} → ${fmt(next)}，当前没有有效关联需要释放`);
+      return;
+    }
+    releaseAndMail(list, '合同变更：预计返利金额变小', () => { c.totalRebate = next; });
   }
+
   if (kind === 'terminate') {
-    const c = D.contracts.find(x => x.contractNo === 'ZZSHF25010022');
-    if (!c || c.terminated) { toast('该合同已终止', 'error'); return; }
-    releaseAndMail(validCorrs(c.id), '合同终止', () => { c.terminated = true; });
+    const no = simVal('sim-term');
+    const c = D.contracts.find(x => x.contractNo === no);
+    if (!c) { toast('请先选择合同号', 'error'); return; }
+    if (c.terminated) { toast('该合同已终止，可用「还原演示数据」恢复', 'error'); return; }
+    const list = validCorrs(c.id);
+    if (!list.length) {
+      c.terminated = true; closeModal(); ctx = null; renderList();
+      toast(`合同 ${no} 已终止，对用户不再可见`);
+      return;
+    }
+    releaseAndMail(list, '合同终止', () => { c.terminated = true; });
   }
+
   ctx = null;
   renderList();
 }
@@ -1023,12 +1519,23 @@ document.addEventListener('click', e => {
     return;
   }
 
+  if (e.target.closest('#tools-btn')) { openToolsModal(); return; }
   if (e.target.closest('#prd-btn')) { openDrawer(); return; }
   if (e.target.closest('#drawer-close') || e.target.id === 'drawer-mask') { closeDrawer(); return; }
   const dt = e.target.closest('[data-drawer-tab]');
   if (dt) { drawerTab = dt.dataset.drawerTab; renderDrawer(); return; }
+  const anchor = e.target.closest('[data-anchor]');
+  if (anchor) {                                  // 方案快速说明：分组锚点跳转
+    const sec = document.getElementById(anchor.dataset.anchor);
+    if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    $$('#drawer-body [data-anchor]').forEach(b => b.classList.toggle('on', b === anchor));
+    return;
+  }
   const sim = e.target.closest('[data-sim]');
-  if (sim) { simulate(sim.dataset.sim); return; }
+  if (sim) { simulate(sim.dataset.sim, sim.dataset); return; }
+
+  const subtype = e.target.closest('[data-subtype]');
+  if (subtype) { ctx.subType = subtype.dataset.subtype; renderDetail(); return; }
 
   const pageTo = e.target.closest('[data-page-to]');
   if (pageTo && !pageTo.disabled) { pageState[currentPage].page = Number(pageTo.dataset.pageTo); renderList(); return; }
@@ -1082,6 +1589,10 @@ document.addEventListener('click', e => {
       ctx.rows.push({ uid: nextUid(), id: '', saved: false, correlationType: '关联返利', rebateCoding: '', rebateName: '', alreadyBillAmount: '', theCorrelationAmount: '' });
       renderDetail();
       break;
+    case 'add-jc-row':
+      ctx.rows.push({ uid: nextUid(), id: '', saved: false, correlationType: '关联货款', jcNo: '', theCorrelationAmount: '' });
+      renderDetail();
+      break;
     case 'del-row': {
       const checked = $$('#detail-tbody .row-check:checked').map(x => x.dataset.uid);
       if (!checked.length) { toast('请先勾选要删除的数据', 'error'); return; }
@@ -1123,6 +1634,58 @@ document.addEventListener('click', e => {
       renderDetail();
       break;
     }
+    case 'pick-daokuan': openDaokuanDialog(ctx.subType); break;
+    case 'dkdlg-query':
+      dkdlg.query = { customer: $('#dk-customer').value.trim(), daokuanId: $('#dk-id').value.trim(), min: $('#dk-min').value.trim(), max: $('#dk-max').value.trim() };
+      dkdlg.page = 1;
+      renderDaokuanDialog();
+      break;
+    case 'dkdlg-page':
+      dkdlg.page = Number(act.dataset.p);
+      renderDaokuanDialog();
+      break;
+    case 'dkdlg-confirm': {
+      if (!dkdlg.picked.size) { toast('请先选择到款数据', 'error'); return; }
+      [...dkdlg.picked].forEach(id => {
+        const d = D.sharedDaokuan.find(x => x.daokuanId === id);
+        ctx.rows.push({
+          uid: nextUid(), id: '', saved: false, correlationType: '关联到款', subType: dkdlg.subType,
+          daokuanId: d.daokuanId, pickedAmount: d.totalPickedAmount,
+          sourceContractNo: d.contractNo, sourceCustomer: d.customer, theCorrelationAmount: ''
+        });
+      });
+      closeModal();
+      renderDetail();
+      break;
+    }
+    case 'view-source': {
+      const c = contractByNo(act.dataset.contractno);
+      $('#modal-body').innerHTML = c
+        ? `<div class="review-group-body">
+             <div class="review-group-row"><label>合同号</label><span>${esc(c.contractNo)}</span></div>
+             <div class="review-group-row"><label>客户名称</label><span>${esc(c.customer)}</span></div>
+             <div class="review-group-row"><label>事业部</label><span>${esc(c.businessDivision)}</span></div>
+             <div class="review-group-row"><label>核算大类</label><span>${esc(c.accountCate)}</span></div>
+             <div class="review-group-row"><label>产品线名称</label><span>${esc(c.productLine)}</span></div>
+           </div>`
+        : `<div class="review-group-body">未查询到合同 ${esc(act.dataset.contractno)} 的信息（原型演示数据未覆盖）。</div>`;
+      showModal('来源合同信息', [['关闭', 'modal-cancel']]);
+      break;
+    }
+    case 'submit-review': submitApproval(); break;
+    case 'review-detail': {
+      const g = reviewState.groups[act.dataset.gkey];
+      g.showDetail = !g.showDetail;
+      renderReviewModal();
+      break;
+    }
+    case 'review-upload': {
+      const g = reviewState.groups[act.dataset.gkey];
+      g.fileName = `凭证_${act.dataset.gkey}_${Date.now().toString().slice(-6)}.zip`;
+      renderReviewModal();
+      toast(`已模拟上传凭证：${g.fileName}（原型不做真实解析）`);
+      break;
+    }
     case 'import-run': {
       const res = runImport(IMPORT_SAMPLES[importPick].rows);
       renderImportModal(importFileName, res);
@@ -1135,14 +1698,26 @@ document.addEventListener('click', e => {
       break;
     }
     case 'import-done': closeModal(); renderList(); break;
-    case 'modal-cancel': closeModal(); break;
+    case 'modal-cancel':
+      closeModal();
+      if (reviewState) { reviewState = null; toast('已取消本次提审，特殊场景的关联需要重新发起'); }
+      break;
   }
 });
 
 document.addEventListener('change', e => {
   if (e.target.id === 'page-size') { pageState[currentPage].size = Number(e.target.value); pageState[currentPage].page = 1; renderList(); return; }
-  if (e.target.id === 'role-select') { D.auth.role = e.target.value; ctx = null; applyDemoMode(); renderList(); toast(`已切换为${perm().label}`); return; }
-  if (e.target.id === 'demo-mode') { demoMode = e.target.checked; applyDemoMode(); ctx ? renderDetail() : renderList(); return; }
+  if (e.target.id === 'role-select') { D.auth.role = e.target.value; ctx = null; applyDevMode(); renderList(); toast(`已切换为${perm().label}`); return; }
+  if (e.target.id === 'dev-mode') { devMode = e.target.checked; applyDevMode(); ctx ? renderDetail() : renderList(); return; }
+  if (e.target.id === 'addon-mode') {
+    addonMode = e.target.checked;
+    if (!addonMode && ctx) {                 // 关掉增补后，若当前正停在增补专属的选项上，退回基线默认值
+      if (ctx.filterType === '关联货款') ctx.filterType = '关联返利';
+      ctx.subType = '通用关联';
+    }
+    ctx ? renderDetail() : renderList();
+    return;
+  }
   if (e.target.id === 'type-select') { ctx.filterType = e.target.value; renderDetail(); return; }
   if (e.target.id === 'status-filter') { ctx.statusFilter = e.target.value; renderDetail(); return; }
   if (e.target.name === 'sample') { importPick = e.target.value; renderImportModal(importFileName, null); return; }
@@ -1158,6 +1733,29 @@ document.addEventListener('change', e => {
       on ? dlg.picked.add(x.dataset.coding) : dlg.picked.delete(x.dataset.coding);
     });
     syncDlgSelection();
+    return;
+  }
+  if (e.target.classList.contains('dkdlg-check')) {
+    e.target.checked ? dkdlg.picked.add(e.target.dataset.id) : dkdlg.picked.delete(e.target.dataset.id);
+    syncDkdlgSelection();
+    return;
+  }
+  if (e.target.classList.contains('dkdlg-check-all')) {
+    const on = e.target.checked;
+    $$('#modal-body .dkdlg-check').forEach(x => {
+      x.checked = on;
+      on ? dkdlg.picked.add(x.dataset.id) : dkdlg.picked.delete(x.dataset.id);
+    });
+    syncDkdlgSelection();
+    return;
+  }
+  if (e.target.classList.contains('jcno-input')) {
+    const row = ctx.rows.find(r => r.uid === e.target.dataset.uid);
+    if (row) row.jcNo = e.target.value.trim();
+    return;
+  }
+  if (e.target.dataset.act === 'review-reason') {
+    reviewState.groups[e.target.dataset.gkey].reason = e.target.value;
     return;
   }
   if (e.target.classList.contains('check-all')) {
@@ -1179,10 +1777,40 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// 演示模式与角色切换
-function applyDemoMode() {
-  $('#role-select').hidden = !demoMode;
-  document.body.classList.toggle('demo-off', !demoMode);
+// 字段说明浮层：hover 命中的表头文字直接弹出说明，position:fixed 不受表格滚动容器裁切影响
+function showHintTip(target) {
+  const tip = $('#hint-tip');
+  const text = target.dataset.tip;
+  if (!tip || !text) return;
+  tip.textContent = text;
+  tip.hidden = false;
+  const r = target.getBoundingClientRect();
+  let left = r.left, top = r.bottom + 8;
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  if (left + tw > window.innerWidth - 8) left = window.innerWidth - tw - 8;
+  if (top + th > window.innerHeight - 8) top = r.top - th - 8; // 下方放不下就翻到上方
+  if (left < 8) left = 8;
+  if (top < 8) top = 8;
+  tip.style.left = left + 'px';
+  tip.style.top = top + 'px';
+}
+function hideHintTip() { const tip = $('#hint-tip'); if (tip) tip.hidden = true; }
+
+document.addEventListener('mouseover', e => {
+  const t = e.target.closest && e.target.closest('.th-hint');
+  if (t) showHintTip(t);
+});
+document.addEventListener('mouseout', e => {
+  const t = e.target.closest && e.target.closest('.th-hint');
+  if (t) hideHintTip();
+});
+document.addEventListener('scroll', hideHintTip, true);
+
+// 开发模式与角色切换
+function applyDevMode() {
+  $('#role-select').hidden = !devMode;
+  $('#tools-btn').hidden = !devMode;
+  document.body.classList.toggle('dev-off', !devMode);
   $('#nav-children').querySelector('[data-page="base"]').hidden = !perm().isAdmin;
   if (currentPage === 'base' && !perm().isAdmin) {
     currentPage = 'pending';
@@ -1191,9 +1819,77 @@ function applyDemoMode() {
 }
 $('#role-select').innerHTML = Object.entries(D.roles)
   .map(([k, v]) => `<option value="${k}" ${k === D.auth.role ? 'selected' : ''}>${v.label}</option>`).join('');
-applyDemoMode();
+applyDevMode();
 
 $('#modal-close').onclick = closeModal;
+
+/* PRD 说明抽屉：默认 880px，可拖动左边缘拉宽、双击恢复默认（表格列多时便于看清文字） */
+const DRAWER_MIN_W = 420;
+$('#drawer-resizer').addEventListener('mousedown', e => {
+  e.preventDefault();
+  const startX = e.clientX;
+  const wrap = $('#drawer');
+  const startW = wrap.getBoundingClientRect().width;
+  const maxW = Math.min(1600, (window.innerWidth || 1440) - 24);
+  const onMove = ev => {
+    const w = Math.min(maxW, Math.max(DRAWER_MIN_W, startW + (startX - ev.clientX)));
+    wrap.style.width = w + 'px';
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    document.body.classList.remove('drawer-resizing');
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+  document.body.classList.add('drawer-resizing');
+});
+$('#drawer-resizer').addEventListener('dblclick', () => { $('#drawer').style.width = ''; });
+
+function preparePrdTable(table) {
+  if (table.dataset.columnsSized === 'true') return;
+  const widths = [...table.querySelectorAll('thead th')].map(th => Math.max(96, Math.round(th.getBoundingClientRect().width)));
+  [...table.querySelectorAll('col')].forEach((col, i) => { col.style.width = widths[i] + 'px'; });
+  table.style.width = widths.reduce((sum, width) => sum + width, 0) + 'px';
+  table.dataset.columnsSized = 'true';
+}
+
+function setPrdColumnWidth(handle, width) {
+  const table = handle.closest('[data-resizable-table]');
+  if (!table) return;
+  preparePrdTable(table);
+  const cols = [...table.querySelectorAll('col')];
+  const col = cols[Number(handle.dataset.col)];
+  if (!col) return;
+  col.style.width = Math.max(96, Math.round(width)) + 'px';
+  table.style.width = cols.reduce((sum, item) => sum + parseFloat(item.style.width || 96), 0) + 'px';
+}
+
+document.addEventListener('mousedown', e => {
+  const handle = e.target.closest('.prd-col-resizer');
+  if (!handle) return;
+  e.preventDefault();
+  const startX = e.clientX;
+  const startWidth = handle.closest('th').getBoundingClientRect().width;
+  const onMove = ev => setPrdColumnWidth(handle, startWidth + ev.clientX - startX);
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    document.body.classList.remove('column-resizing');
+    handle.focus();
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+  document.body.classList.add('column-resizing');
+});
+
+document.addEventListener('keydown', e => {
+  const handle = e.target.closest('.prd-col-resizer');
+  if (!handle || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+  e.preventDefault();
+  const current = handle.closest('th').getBoundingClientRect().width;
+  setPrdColumnWidth(handle, current + (e.key === 'ArrowRight' ? 16 : -16));
+});
 $('#file-input').onchange = e => { if (e.target.files[0]) { importFileName = e.target.files[0].name; importPick = 'ok'; openImportModal(importFileName); e.target.value = ''; } };
 $('#user-name').textContent = D.auth.userName;
 renderList();

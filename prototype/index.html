@@ -12,10 +12,14 @@
     <button class="menu-toggle" aria-label="收起导航">☰</button>
     <div class="crumb">采购管理平台 <span>/</span> 预计返利管理 <span>/</span> <b id="crumb-current">待关联返利合同</b></div>
     <div class="topbar-right">
-      <label class="demo-switch" title="打开后显示角色切换与字段口径说明，关闭后即为上线形态">
-        <input type="checkbox" id="demo-mode" checked /><span class="track"><span class="knob"></span></span>演示模式
+      <label class="dev-switch" title="打开后显示角色切换、演示工具入口，以及字段级说明提示；关闭后即为上线形态">
+        <input type="checkbox" id="dev-mode" checked /><span class="track"><span class="knob"></span></span>开发模式
+      </label>
+      <label class="dev-switch addon-switch" title="打开后编辑页出现 2026-09-10 增补需求的新关联方式；关闭即为改动前的基线原型，方便对比">
+        <input type="checkbox" id="addon-mode" checked /><span class="track"><span class="knob"></span></span>场景优化（增补）
       </label>
       <select id="role-select" title="切换当前登录人的角色，用于演示权限差异"></select>
+      <button id="tools-btn" class="prd-btn">演示工具</button>
       <button id="prd-btn" class="prd-btn">PRD 说明</button>
       <div class="user"><span class="bell">♧</span><img src="assets/avatar.png" alt="个人头像" /><span id="user-name">张茜彤</span><span>⌄</span></div>
     </div>
@@ -41,7 +45,6 @@
       <section class="card table-card">
         <div class="table-title" id="table-title"></div>
         <div class="table-wrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
-        <div class="note-legend" id="note-legend"></div>
         <div class="pager">
           <span id="total"></span>
           <select><option>10条/页</option><option>20条/页</option></select>
@@ -59,7 +62,6 @@
         </div>
         <div class="from-view" id="type-switch"></div>
         <div class="table-wrap"><table><thead id="detail-thead"></thead><tbody id="detail-tbody"></tbody></table></div>
-        <div class="note-legend" id="detail-note-legend"></div>
         <div class="toolbar-line" id="detail-toolbar"></div>
         <div class="footer-btns" id="detail-footer"></div>
       </section>
@@ -78,14 +80,16 @@
 
   <div class="drawer-mask" id="drawer-mask" hidden></div>
   <aside class="drawer" id="drawer" hidden>
+    <div class="drawer-resizer" id="drawer-resizer" title="拖动调整宽度，双击恢复默认"></div>
     <div class="drawer-head">
       <h2>PRD 说明</h2>
-      <span class="drawer-sub">原型无法直接呈现的内容、版本变化与演示工具</span>
       <button id="drawer-close">×</button>
     </div>
     <div class="drawer-tabs" id="drawer-tabs"></div>
     <div class="drawer-body" id="drawer-body"></div>
   </aside>
+
+  <div class="hint-tip" id="hint-tip" hidden></div>
 
   <input type="file" id="file-input" accept=".xlsx" hidden />
   <script src="mock-data.js"></script>
