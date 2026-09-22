@@ -280,3 +280,114 @@ body.column-resizing{cursor:col-resize;user-select:none}
 
 /* 菜单项隐藏（超级管理员才可见返利底表） */
 .nav-item[hidden]{display:none}
+
+/* ===== 增补：待关联列表批量操作区（位于标题与列表之间） ===== */
+.list-toolbar{display:flex;justify-content:flex-start;align-items:center;gap:10px;margin:2px 0 16px;min-height:37px}
+.batch-menu{position:relative}
+.batch-main{min-width:132px}
+.batch-main .caret{margin-left:8px;font-size:12px}
+.batch-pop{position:absolute;z-index:12;right:0;top:42px;min-width:168px;background:#fff;border:1px solid #d7e0ea;border-radius:4px;
+  box-shadow:0 8px 20px rgba(31,45,61,.14);overflow:hidden}
+.batch-pop button{display:block;width:100%;height:40px;border:0;background:#fff;text-align:left;padding:0 16px;color:#53606d;cursor:pointer;font:inherit}
+.batch-pop button:hover{background:#f3f7fb;color:var(--blue)}
+
+/* ===== 增补：批量提交审批 Modal，复用现有样式，适度放宽并增加留白 ===== */
+.modal.review .modal-panel{width:min(1180px,92vw);max-height:88vh;overflow:hidden;display:flex;flex-direction:column}
+.modal.review .modal-head{height:58px;padding:0 22px;flex:0 0 auto}
+.modal.review #modal-body{flex:1 1 auto;min-height:0;overflow:auto;padding:20px 24px 8px}
+.modal.review .modal-actions{padding:14px 20px 18px;flex:0 0 auto}
+.modal.review .review-group{margin-bottom:16px;border:1px solid #dfe6ee;border-radius:5px;overflow:hidden}
+.modal.review .review-group-head{width:100%;border:0;background:#f5f8fc;padding:13px 16px;text-align:left;cursor:pointer;
+  display:flex;align-items:center;gap:9px;color:#334155;font:inherit}
+.modal.review .review-group.open .review-group-head{border-bottom:1px solid var(--line)}
+.review-arrow{width:16px;color:#586779;font-size:12px;flex:0 0 auto}
+.review-sep{color:#b7c0ca;margin:0 2px}
+.review-count{color:#7c8998;font-size:12.5px}
+.modal.review .review-group-body{padding:18px 18px 20px}
+.review-field{display:flex;align-items:flex-start;gap:14px;margin-bottom:18px}
+.review-field>label{min-width:76px;padding-top:8px;color:#44505d;font-weight:600}
+.review-field textarea{flex:1;min-height:64px;border:1px solid #d5dde7;border-radius:4px;padding:8px 10px;resize:vertical;font:inherit;color:#53606d}
+.review-evidence-head{margin:4px 0 10px;color:#303b47;font-size:14px;display:flex;align-items:center;gap:12px}
+.review-evidence-add{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.review-evidence-add select{height:37px;border:1px solid #d5dde7;border-radius:4px;padding:0 10px;background:#fff;color:#53606d;min-width:120px;max-width:260px}
+.file-pick-btn{height:37px;display:inline-flex;align-items:center;padding:0 17px;background:var(--blue);color:#fff;border-radius:4px;cursor:pointer;white-space:nowrap}
+.file-pick-btn input{display:none}.file-pick-btn.disabled{background:#9fcaf4;cursor:not-allowed}
+.review-picked-files{flex:1;min-width:150px;color:#7d8896;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.review-evidence-table,.review-detail-table{margin:0;border-top:1px solid var(--line)}
+.review-evidence-table table,.review-detail-table table{min-width:100%}
+.review-evidence-table th,.review-evidence-table td{min-width:110px;max-width:280px;height:42px;font-size:13px}
+.review-evidence-table th{background:#eef3f8;color:#465565}
+.review-detail-title{margin-top:4px}
+.review-detail-table{overflow:auto;max-width:100%}
+.review-detail-table table{min-width:1120px}
+.review-detail-table th,.review-detail-table td{height:43px;min-width:110px;max-width:160px;font-size:12.5px}
+.review-detail-table thead tr:first-child th{background:#5f84b0}
+.review-detail-table thead tr:nth-child(2) th{background:#7598bf}
+.review-detail-table th[rowspan="2"]{vertical-align:middle}
+.evidence-missing{color:#d83931!important;font-weight:600}
+.review-warning{text-align:right;color:#d83931;font-size:12.5px;padding-top:2px}
+
+.review-evidence-tip{color:#8a96a5;font-size:12px;font-weight:400}
+.review-scope-picker{min-width:260px;max-width:620px;flex:1}
+.review-scope-picker>select{width:100%;max-width:320px}
+.review-contract-picker{border:1px solid #d5dde7;border-radius:4px;background:#fff;padding:8px 10px;min-height:37px}
+.review-check-all{display:inline-flex;align-items:center;gap:5px;padding-right:12px;margin-right:8px;border-right:1px solid #e4e9ef;color:#3e4b59;font-weight:600}
+.review-contract-options{display:inline-flex;flex-wrap:wrap;gap:7px 14px;vertical-align:top}
+.review-contract-options label{display:inline-flex;align-items:center;gap:5px;color:#5d6875;white-space:nowrap}
+.review-contract-picker input{accent-color:var(--blue)}
+.review-evidence-table{margin-bottom:18px}
+.review-evidence-table td:nth-child(3){max-width:340px}
+.review-evidence-table td:nth-child(4){min-width:150px}
+.review-evidence-table td:last-child{min-width:100px}
+.review-detail-title{margin-top:18px!important}
+
+
+/* ===== v5 评审调整：100% 缩放可用、收窄导航、审批状态与凭证下拉 ===== */
+/* 页面整体密度按 100% 浏览器缩放重新收紧，不使用 CSS zoom */
+.topbar{height:64px}
+.brand{width:174px;margin:0 34px 0 36px}
+.crumb{font-size:14px;margin-left:20px}
+.user{gap:9px;margin-right:20px;font-size:14px}
+.user img{width:34px;height:34px}
+.sidebar{top:64px;width:270px}
+.sidebar nav>div,.nav-item{height:56px;font-size:15px}
+.nav-item{padding-left:70px}
+main{margin-left:270px;padding:76px 12px 16px}
+.filters{padding:20px 22px 15px;min-height:170px}
+.filter-grid{grid-template-columns:repeat(4,minmax(190px,1fr));gap:17px 28px}
+.field{gap:10px}.field label{min-width:68px;font-size:14px}.field input,.field select{height:34px;padding:0 10px}
+.actions{margin-top:17px}.btn{height:34px;padding:0 17px}
+.table-card{padding:15px 22px}.table-title{font-size:18px;margin-bottom:12px}
+th{height:46px;font-size:14px}td{height:47px}th,td{padding:0 10px;min-width:116px;max-width:158px}
+.list-toolbar{margin:0 0 13px;min-height:34px}
+
+/* 待提审批合同：只做轻量提示，不整行染色 */
+.row-needs-approval td:first-child{box-shadow:inset 3px 0 0 #faad14}
+.approval-tag{display:inline-block;padding:2px 9px;border-radius:10px;font-size:12px;font-weight:600;line-height:18px}
+.approval-tag.todo{background:#fff4e5;color:#c87500;border:1px solid #ffd394}
+.approval-tag.running{background:#edf5ff;color:#2476c8;border:1px solid #c9e1ff}
+.approval-tag.passed{background:#edf9f0;color:#32854a;border:1px solid #c9e8d1}
+.approval-tag.rejected{background:#fff0f0;color:#c53d3d;border:1px solid #f3c6c6}
+
+/* 批量审批弹窗：介于 v3/v4 宽度之间，增加纵向呼吸感 */
+.modal.review .modal-panel{width:min(1240px,93vw)}
+.modal.review #modal-body{padding:22px 26px 10px}
+.modal.review .review-group-body{padding:20px 20px 22px}
+.review-field{margin-bottom:22px}
+.review-evidence-head{margin:7px 0 12px}
+.review-evidence-add{align-items:center;gap:12px;margin-bottom:14px}
+.review-evidence-tip{display:none!important}
+.review-scope-picker{min-width:260px;max-width:430px}
+.review-contract-dropdown{position:relative;width:100%;max-width:430px}
+.review-contract-trigger{width:100%;height:37px;border:1px solid #d5dde7;border-radius:4px;background:#fff;color:#53606d;padding:0 12px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;font:inherit;text-align:left}
+.review-contract-trigger:hover{border-color:#a9c7e4}
+.review-contract-pop{position:absolute;z-index:8;left:0;right:0;top:42px;max-height:240px;overflow:auto;background:#fff;border:1px solid #d5dde7;border-radius:4px;box-shadow:0 8px 22px rgba(31,45,61,.16);padding:8px 10px}
+.review-contract-pop .review-check-all{display:flex;border-right:0;border-bottom:1px solid #edf1f5;margin:0 0 6px;padding:5px 2px 9px}
+.review-contract-options{display:flex;flex-direction:column;gap:0}
+.review-contract-options label{display:flex;padding:7px 4px;border-radius:3px}
+.review-contract-options label:hover{background:#f5f8fc}
+.review-evidence-table{margin-bottom:22px}
+.review-detail-title{margin-top:22px!important}
+.review-detail-table td:last-child,.review-detail-table th:last-child{min-width:76px;max-width:90px}
+
+@media(max-width:1100px){.sidebar{width:220px}main{margin-left:220px}.nav-item{padding-left:58px}}

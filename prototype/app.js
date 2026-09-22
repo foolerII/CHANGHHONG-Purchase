@@ -8,6 +8,7 @@
 
 /* ---------------- 基础工具 ---------------- */
 const D = window.rebateMockData;
+D.reviewDrafts = D.reviewDrafts || []; // 增补：特殊关联保存后先进入待提审池，由待关联列表批量提交审批
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -46,7 +47,7 @@ const validCorrs = cid => D.correlations.filter(c => c.contractId === cid && c.s
 const effectiveCorrs = cid => D.correlations.filter(c => c.contractId === cid && (c.status === 1 || c.status === 2));
 const hasPendingApproval = cid => D.correlations.some(c => c.contractId === cid && c.status === 2);
 
-// 合同剩余返利金额 = 预计返利金额 − （有效 + 审批中）关联合计（关联返利 + 关联到款 + 关联货款合并）
+// 合同剩余返利金额 = 预计返利金额 − （有效 + 审批中）关联合计（关联返利 + 关联到款）
 const contractRebateCents = c => cents(c.totalRebate) - sumCents(effectiveCorrs(c.id), x => x.theCorrelationAmount);
 
 // 关联类型：到款/货款行金额为 0 或空时不展示对应标签；审批中的记录也计入展示（业务能看到这笔占着额度）
@@ -54,7 +55,6 @@ function theType(c) {
   const l = effectiveCorrs(c.id), out = [];
   if (l.some(x => x.correlationType === '关联返利')) out.push('关联返利');
   if (l.some(x => x.correlationType === '关联到款' && cents(x.theCorrelationAmount) > 0)) out.push('关联到款');
-  if (l.some(x => x.correlationType === '关联货款' && cents(x.theCorrelationAmount) > 0)) out.push('关联货款');
   return out.join('、');
 }
 
@@ -99,7 +99,8 @@ const FILTERS = {
     { key: 'accountCate', label: '核算大类', type: 'select', ph: '请选择核算大类', opts: () => uniq(D.contracts, 'accountCate') },
     { key: 'businessDivision', label: '事业部', type: 'select', ph: '请选择事业部', opts: () => uniq(D.contracts, 'businessDivision') },
     { key: 'salerName', label: '销售员', type: 'select', ph: '请选择销售员', opts: () => uniq(D.contracts, 'salerName') },
-    { key: 'outboundAmount', label: '合同出库金额', type: 'select', ph: '请选择', opts: () => [['1', '大于0'], ['0', '等于0']] }
+    { key: 'outboundAmount', label: '合同出库金额', type: 'select', ph: '请选择', opts: () => [['1', '大于0'], ['0', '等于0']] },
+    { key: 'approvalStatus', label: '审批状态', type: 'select', ph: '全部', opts: () => [['待提交', '待提交'], ['审批中', '审批中'], ['审批通过', '审批通过'], ['审批驳回', '审批驳回'], ['审批拒绝', '审批拒绝']] }
   ],
   linked: [
     { key: 'applyDate', label: '申请日期', type: 'daterange' },
@@ -127,6 +128,20 @@ const FILTERS = {
 const filterState = { pending: {}, linked: {}, details: {}, base: {} };
 const pageState = { pending: { page: 1, size: 10 }, linked: { page: 1, size: 10 }, details: { page: 1, size: 10 }, base: { page: 1, size: 10 } };
 
+function contractApprovalStatus(c) {
+  if ((D.reviewDrafts || []).some(r => r.contractId === c.id)) return '待提交';
+  if (D.correlations.some(r => r.contractId === c.id && r.status === 2)) return '审批中';
+  return '—';
+}
+function approvalStatusHtml(c) {
+  const st = contractApprovalStatus(c);
+  if (st === '待提交') return '<span class="approval-tag todo">待提交</span>';
+  if (st === '审批中') return '<span class="approval-tag running">审批中</span>';
+  if (st === '审批驳回' || st === '审批拒绝') return `<span class="approval-tag rejected">${st}</span>`;
+  if (st === '审批通过') return '<span class="approval-tag passed">审批通过</span>';
+  return '—';
+}
+
 function matchContract(c, f) {
   return like(c.contractNo, f.contractNo) && like(c.customer, f.customer)
     && eqv(c.accountCate, f.accountCate) && eqv(c.businessDivision, f.businessDivision)
@@ -134,7 +149,8 @@ function matchContract(c, f) {
     && inRange(c.applyDate, f.applyDate_start, f.applyDate_end)
     && inRange(c.estimatedRebateTime, f.estimatedRebateTime_start, f.estimatedRebateTime_end)
     && (f.outboundAmount === undefined || f.outboundAmount === ''
-      || (f.outboundAmount === '1' ? cents(c.outboundAmount) > 0 : cents(c.outboundAmount) === 0));
+      || (f.outboundAmount === '1' ? cents(c.outboundAmount) > 0 : cents(c.outboundAmount) === 0))
+    && (!f.approvalStatus || contractApprovalStatus(c) === f.approvalStatus);
 }
 
 /* ---------------- 列表页配置 ---------------- */
@@ -142,14 +158,14 @@ const PAGES = {
   pending: {
     title: '待关联返利列表',
     actions: () => perm().canEdit ? ['导出待关联模板', '批量导入', '导出查询结果', '查询', '重置'] : ['导出查询结果', '查询', '重置'],
-    columns: ['', '序号', '申请日期', '合同号', '事业部', '客户名称', '销售员', '审批类型', '合同金额', '合同出库金额',
-      '产品线名称', '核算大类', '预计返利金额', '合同剩余返利金额', '币种', '预计返利时间', '关联类型', '操作'],
+    columns: ['', '序号', '申请日期', '合同号', '事业部', '客户名称', '销售员', '合同类型', '合同金额', '合同出库金额',
+      '产品线名称', '核算大类', '预计返利金额', '合同剩余返利金额', '币种', '预计返利时间', '关联类型', '审批状态', '操作'],
     rows: f => pendingContracts().filter(c => matchContract(c, f)).map((c, i) => ({
       key: c.id,
       cells: ['<input type="checkbox" class="row-check">', i + 1, c.applyDate, c.contractNo, c.businessDivision,
         c.customer, c.salerName, c.prevIdStr, fmt(c.contractAmount), fmt(c.outboundAmount), c.productLine,
         c.accountCate, fmt(c.totalRebate), fmt(yuan(contractRebateCents(c))), dict('cmn_currency_code', c.currency),
-        c.estimatedRebateTime, theType(c) || '—'],
+        c.estimatedRebateTime, theType(c) || '—', approvalStatusHtml(c)],
       ops: perm().canEdit ? [['查看详情', 'view'], ['编辑', 'edit']] : [['查看详情', 'view']]
     }))
   },
@@ -157,7 +173,7 @@ const PAGES = {
   linked: {
     title: '已关联返利列表',
     actions: () => ['导出查询结果', '查询', '重置'],
-    columns: ['序号', '申请日期', '合同号', '事业部', '客户名称', '销售员', '审批类型', '合同金额', '合同出库金额',
+    columns: ['序号', '申请日期', '合同号', '事业部', '客户名称', '销售员', '合同类型', '合同金额', '合同出库金额',
       '产品线名称', '核算大类', '预计返利金额', '币种', '预计返利时间', '关联类型', '操作'],
     rows: f => linkedContracts().filter(c => matchContract(c, f)).map((c, i) => ({
       key: c.id,
@@ -172,7 +188,7 @@ const PAGES = {
     title: '已关联返利明细列表',
     actions: () => ['导出查询结果', '查询', '重置'],
     columns: ['序号', '关联日期', '合同号', '合同出库金额', '事业部', '客户名称', '产品线名称', '核算大类', '币种',
-      '预计返利金额', '关联类型', '关联返利编码', '返利名称', '已上账金额', '剩余可关联金额', '到款ID / 杂入单号', '挑款金额', '关联金额', '审批状态'],
+      '预计返利金额', '关联类型', '关联返利编码', '返利名称', '已上账金额', '剩余可关联金额', '到款ID', '挑款金额', '关联金额', '审批状态'],
     rows: f => D.correlations.filter(r => r.status === 1 || r.status === 2).map(r => ({ r: r, c: contractById(r.contractId) || {} }))
       .filter(x => !x.c.terminated)
       .filter(x => like(x.c.contractNo, f.contractNo) && like(x.c.customer, f.customer)
@@ -187,7 +203,7 @@ const PAGES = {
           cells: [i + 1, r.correlationDate, c.contractNo, fmt(c.outboundAmount), c.businessDivision, c.customer,
             c.productLine, c.accountCate, dict('cmn_currency_code', c.currency), fmt(c.totalRebate), typeLabel,
             isFl ? r.rebateCoding : '—', isFl ? r.rebateName : '—', isFl ? fmt(r.alreadyBillAmount) : '—',
-            isFl ? fmt(yuan(st.residue)) : '—', isFl ? '—' : (r.daokuanId || r.jcNo || '—'), isDk ? fmt(r.pickedAmount) : '—',
+            isFl ? fmt(yuan(st.residue)) : '—', isFl ? '—' : (r.daokuanId || '—'), isDk ? fmt(r.pickedAmount) : '—',
             fmt(r.theCorrelationAmount), r.status === 2 ? '<span class="addon-badge pending">审批中</span>' : '—'],
           ops: null
         };
@@ -236,7 +252,6 @@ const FIELD_HINTS = {
   '来源合同号': '增补：跨合同/跨客户/厂商款补/其他款补场景专属，这笔到款原本挂靠的合同号，点击可查看来源合同的客户名称等信息，固定列不随横向滚动移出视口',
   '挑款总金额': '增补：4 类特殊到款场景的共享到款池额度，跨合同共享，不是该合同专属；口径同返利编码的「已上账金额」',
   '剩余可用': '增补：挑款总金额 − 全部合同对该到款ID的有效 + 审批中关联金额之和，谁先关联谁先占用（与返利编码「剩余可关联金额」同一口径）',
-  '杂入单编号': '增补：手工填写，保存时只校验该编号是否真实存在（调用外部系统接口），不做金额校验；同一编号允许重复关联、支持多张杂入单',
   '审批状态': '增补：status=2 时显示「审批中」，占用共享到款额度；通过后变为有效不再标注，驳回后失效并释放额度'
 };
 
@@ -301,8 +316,26 @@ function renderList() {
   $('#crumb-current').textContent = document.querySelector(`[data-page="${currentPage}"]`).textContent;
   $('#table-title').textContent = p.title;
 
+  const pageActions = p.actions();
+  const filterActions = (currentPage === 'pending' && addonMode)
+    ? pageActions.filter(a => !['导出待关联模板', '批量导入'].includes(a))
+    : pageActions;
   $('#filters').innerHTML = filterHtml(currentPage) +
-    `<div class="actions">${p.actions().map(a => `<button class="btn ${a === '重置' ? '' : 'primary'}" data-action="${a}">${a}</button>`).join('')}</div>`;
+    `<div class="actions">${filterActions.map(a => `<button class="btn ${a === '重置' ? '' : 'primary'}" data-action="${a}">${a}</button>`).join('')}</div>`;
+
+  const listToolbar = $('#list-toolbar');
+  if (currentPage === 'pending' && addonMode && perm().canEdit) {
+    listToolbar.innerHTML = `<div class="batch-menu">
+      <button class="btn primary batch-main" data-act="batch-menu-toggle">批量关联 <span class="caret">∨</span></button>
+      <div class="batch-pop" hidden>
+        <button data-action="导出待关联模板">导出待关联模板</button>
+        <button data-action="批量导入">批量导入</button>
+      </div>
+    </div>
+    <button class="btn primary" data-act="open-batch-review">提交审批</button>`;
+  } else {
+    listToolbar.innerHTML = '';
+  }
 
   const all = p.rows(filterState[currentPage]);
   const ps = pageState[currentPage];
@@ -313,9 +346,9 @@ function renderList() {
   resetHints();
   $('#thead').innerHTML = `<tr>${p.columns.map(thCell).join('')}</tr>`;
   $('#tbody').innerHTML = rows.length
-    ? rows.map(r => `<tr data-key="${r.key}">${r.cells.map(v => {
+    ? rows.map(r => `<tr data-key="${r.key}" class="${currentPage === 'pending' && contractApprovalStatus(contractById(r.key) || {}) === '待提交' ? 'row-needs-approval' : ''}">${r.cells.map(v => {
         const s = String(v);
-        const isHtml = s.startsWith('<input') || s.startsWith('<span');
+        const isHtml = s.startsWith('<input') || s.startsWith('<span') || s.startsWith('<button');
         return `<td title="${isHtml ? '' : esc(v)}">${isHtml ? v : esc(v)}</td>`;
       }).join('')}${
         r.ops ? `<td class="col-sticky">${r.ops.map(o => `<button class="link" data-op="${o[1]}" data-key="${r.key}">${o[0]}</button>`).join(' ')}</td>` : ''}</tr>`).join('')
@@ -364,7 +397,7 @@ function buildEditRows(contract) {
       theCorrelationAmount: saved ? fmt(saved.theCorrelationAmount) : '0.00'
     });
   });
-  // 增补需求：4 类特殊到款场景 + 关联货款，已保存（status=1，审批已通过）的记录也带出来展示，但不可再编辑（金额锁定，提交中的记录不在此出现）
+  // 增补需求：4 类特殊到款场景，已保存（status=1，审批已通过）的记录也带出来展示，但不可再编辑（金额锁定，提交中的记录不在此出现）
   validCorrs(contract.id).filter(c => c.correlationType === '关联到款' && SPECIAL_DK_SUBTYPES.includes(c.subType)).forEach(c => {
     rows.push({
       uid: nextUid(), id: c.id, saved: true, correlationType: '关联到款', subType: c.subType,
@@ -372,11 +405,10 @@ function buildEditRows(contract) {
       theCorrelationAmount: fmt(c.theCorrelationAmount)
     });
   });
-  validCorrs(contract.id).filter(c => c.correlationType === '关联货款').forEach(c => {
-    rows.push({
-      uid: nextUid(), id: c.id, saved: true, correlationType: '关联货款', jcNo: c.jcNo,
-      theCorrelationAmount: fmt(c.theCorrelationAmount)
-    });
+  // 增补：已保存但尚未提交审批的特殊关联，重新进入编辑页时仍可看到并调整
+  D.reviewDrafts.filter(r => r.contractId === contract.id).forEach(d => {
+    rows.push(Object.assign({}, d, { uid: nextUid(), id: d.id || '', saved: false, draft: true,
+      theCorrelationAmount: fmt(d.theCorrelationAmount) }));
   });
   return rows;
 }
@@ -421,8 +453,7 @@ function renderDetail() {
 
   $('#type-switch').innerHTML = isEdit
     ? `<div class="label">关联方式</div><div class="value"><select id="type-select">
-         <option value="关联返利">关联返利</option><option value="关联到款">关联到款</option>${
-           addonMode ? '<option value="关联货款">关联货款</option>' : ''}</select></div>
+         <option value="关联返利">关联返利</option><option value="关联到款">关联到款</option></select></div>
        <div class="msg">ⓘ 此处可切换关联方式</div>${
          addonMode && ctx.filterType === '关联到款' ? `<div class="subtype-tabs">${
            ['通用关联', '跨合同关联', '跨客户关联', '厂商款补', '其他款补'].map(t =>
@@ -435,10 +466,8 @@ function renderDetail() {
   $('#detail-toolbar').innerHTML = !isEdit ? '' : (() => {
     if (ctx.filterType === '关联返利') return `<button class="btn primary" data-act="add-row">增加一行</button>
        <button class="btn danger" data-act="del-row">删除所选</button>`;
-    if (ctx.filterType === '关联货款' && addonMode) return `<button class="btn primary" data-act="add-jc-row">增加一行</button>
-       <button class="btn danger" data-act="del-row">删除所选</button>`;
     if (ctx.filterType === '关联到款' && addonMode && ctx.subType !== '通用关联')
-      return `<button class="btn primary" data-act="pick-daokuan">增加到款</button>
+      return `<button class="btn primary" data-act="pick-daokuan">增加一行</button>
        <button class="btn danger" data-act="del-row">删除所选</button>`;
     return '';
   })();
@@ -450,17 +479,13 @@ function renderDetail() {
 
 function renderEditTable() {
   const isFl = ctx.filterType === '关联返利';
-  const isJc = ctx.filterType === '关联货款' && addonMode;
   const isDkSpecial = ctx.filterType === '关联到款' && addonMode && ctx.subType !== '通用关联';
-  const rows = isJc
-    ? ctx.rows.filter(r => r.correlationType === '关联货款')
-    : ctx.filterType === '关联到款'
+  const rows = ctx.filterType === '关联到款'
       ? ctx.rows.filter(r => r.correlationType === '关联到款' && (addonMode ? (r.subType || '通用关联') === ctx.subType : true))
       : ctx.rows.filter(r => r.correlationType === ctx.filterType);
 
   let cols;
   if (isFl) cols = ['<input type="checkbox" class="check-all">', ...commonCols(true), '返利编码', '返利名称', '已上账金额', '剩余可关联金额', '本次关联金额'];
-  else if (isJc) cols = ['<input type="checkbox" class="check-all">', ...commonCols(true), '杂入单编号', '关联金额'];
   else if (isDkSpecial) cols = ['<input type="checkbox" class="check-all">', ...commonCols(true), '到款ID', '挑款总金额', '剩余可用', '关联金额', '来源合同号'];
   else cols = ['', ...commonCols(true), '到款ID', '挑款金额', '关联金额'];
   $('#detail-thead').innerHTML = `<tr>${cols.map(thCell).join('')}</tr>`;
@@ -468,14 +493,13 @@ function renderEditTable() {
   if (!rows.length) {
     $('#detail-tbody').innerHTML = `<tr><td class="empty" colspan="${cols.length}">${
       isFl ? '暂无关联返利数据，请点击左下方「增加一行」新增'
-      : isJc ? '暂无关联货款数据，请点击左下方「增加一行」新增'
-      : isDkSpecial ? '暂无数据，请点击左下方「增加到款」从共享到款池选择'
+      : isDkSpecial ? '该合同无关联到款数据，请点击左下方「增加一行」新增'
       : '该合同在到款系统中暂无挑款记录'}</td></tr>`;
     return;
   }
 
   $('#detail-tbody').innerHTML = rows.map((r, i) => {
-    const checkable = isFl || isJc || isDkSpecial;
+    const checkable = isFl || isDkSpecial;
     const head = `<td>${checkable ? `<input type="checkbox" class="row-check" data-uid="${r.uid}">` : ''}</td>`;
     const common = commonCells(i + 1, true, r.correlationType).map(v => `<td title="${esc(v)}">${esc(v)}</td>`).join('');
 
@@ -486,13 +510,6 @@ function renderEditTable() {
         <td title="${esc(r.rebateName)}">${esc(r.rebateName || '')}</td>
         <td>${r.alreadyBillAmount ? fmt(r.alreadyBillAmount) : ''}</td>
         <td>${st ? fmt(yuan(st.residue)) : '—'}</td>
-        <td>${r.saved ? fmt(r.theCorrelationAmount)
-          : `<input class="amount-input" data-uid="${r.uid}" value="${esc(r.theCorrelationAmount)}">`}</td></tr>`;
-    }
-
-    if (isJc) {
-      return `<tr data-uid="${r.uid}">${head}${common}
-        <td>${r.saved ? esc(r.jcNo) : `<input class="jcno-input" data-uid="${r.uid}" value="${esc(r.jcNo || '')}" placeholder="填写杂入单编号">`}</td>
         <td>${r.saved ? fmt(r.theCorrelationAmount)
           : `<input class="amount-input" data-uid="${r.uid}" value="${esc(r.theCorrelationAmount)}">`}</td></tr>`;
     }
@@ -710,10 +727,11 @@ function showModal(title, actions, variant) {
     `<button class="btn ${a[1] === 'modal-cancel' ? '' : 'primary'}" data-act="${a[1]}">${a[0]}</button>`).join('');
   $('#modal').classList.add('open');
   $('#modal').classList.toggle('tools', variant === 'tools');
+  $('#modal').classList.toggle('review', variant === 'review');
   $('#modal').setAttribute('aria-hidden', 'false');
 }
 function closeModal() {
-  $('#modal').classList.remove('open', 'tools');
+  $('#modal').classList.remove('open', 'tools', 'review');
   $('#modal').setAttribute('aria-hidden', 'true');
 }
 
@@ -760,14 +778,14 @@ function validateSave() {
     if (pick && dkTotal[id] > cents(pick.pickedAmount))
       return `到款ID ${id} 在本合同下关联金额合计 ${fmt(yuan(dkTotal[id]))}，大于挑款金额 ${fmt(pick.pickedAmount)}`;
   }
-  // 合同额度校验：不管普通还是特殊（含关联货款），都要计入同一个「预计返利金额」额度
+  // 合同额度校验：普通与特殊到款都计入同一个「预计返利金额」额度
   const all = sumCents(ctx.rows, r => r.theCorrelationAmount);
   if (all > cents(ctx.contract.totalRebate))
     return `本次关联合计 ${fmt(yuan(all))}，大于预计返利金额 ${fmt(ctx.contract.totalRebate)}`;
   return null;
 }
 
-// 增补需求：把 ctx.rows 拆成「普通」（关联返利 + 通用关联到款，立即生效）和「特殊」（4 类特殊到款 + 关联货款，需走提审）
+// 增补需求：把 ctx.rows 拆成「普通」（关联返利 + 通用关联到款，立即生效）和「特殊」（4 类特殊到款，需走提审）
 function partitionRows() {
   const normal = [], special = [];
   ctx.rows.forEach(r => {
@@ -777,25 +795,17 @@ function partitionRows() {
       (isSpecial ? special : normal).push(r);
       return;
     }
-    if (r.correlationType === '关联货款') { special.push(r); }
   });
   return { normal: normal, special: special };
 }
 
-// 特殊场景校验：关联金额必须 > 0；到款类还要卡共享到款池剩余可用；关联货款只校验杂入单是否真实存在，不做金额校验
+// 特殊场景校验：关联金额必须 > 0，并校验共享到款池剩余可用
 function validateSpecialRows(special) {
   for (let i = 0; i < special.length; i++) {
     const r = special[i];
     if (r.saved) continue;
-    if (r.correlationType === '关联货款') {
-      if (!r.jcNo) return `关联货款：第${i + 1}行请填写杂入单编号`;
-      if (!D.jcOrders.includes(r.jcNo)) return `关联货款：杂入单编号 ${r.jcNo} 不存在，请核实后重新填写（调用外部系统接口校验）`;
-      if (!amountOk(r.theCorrelationAmount) || cents(r.theCorrelationAmount) <= 0)
-        return `关联货款：第${i + 1}行关联金额必须大于 0，且最多两位小数`;
-    } else {
-      if (!amountOk(r.theCorrelationAmount) || cents(r.theCorrelationAmount) <= 0)
-        return `${r.subType}：第${i + 1}行关联金额必须大于 0，且最多两位小数`;
-    }
+    if (!amountOk(r.theCorrelationAmount) || cents(r.theCorrelationAmount) <= 0)
+      return `${r.subType}：第${i + 1}行关联金额必须大于 0，且最多两位小数`;
   }
   const byDk = {};
   special.filter(r => r.correlationType === '关联到款' && !r.saved).forEach(r => {
@@ -839,13 +849,21 @@ function doSave() {
   });
 
   const pendingSpecial = special.filter(r => !r.saved);
-  ctx.rows = buildEditRows(ctx.contract);   // 刷新本地状态：普通行已落库，避免残留未保存标记导致重复提交
+  // 增补：特殊关联先保存为“待提审”草稿，不立即进入审批；列表可勾选多个合同统一提交凭证/原因
+  D.reviewDrafts = D.reviewDrafts.filter(r => r.contractId !== ctx.contract.id);
+  pendingSpecial.forEach(r => D.reviewDrafts.push(Object.assign({}, r, {
+    draftId: 'D' + nextUid(), contractId: ctx.contract.id, productLine: ctx.contract.productLine,
+    customer: ctx.contract.customer, contractNo: ctx.contract.contractNo,
+    businessDivision: ctx.contract.businessDivision, accountCate: ctx.contract.accountCate,
+    theCorrelationAmount: Number(r.theCorrelationAmount)
+  })));
+  ctx.rows = buildEditRows(ctx.contract);
   renderDetail();
 
   if (pendingSpecial.length) {
-    openReviewModal(pendingSpecial);
-    toast('普通关联已保存生效；特殊场景需提审，请在弹窗中上传凭证、填写原因');
-    return; // 留在编辑页，等提审完成或取消后再退出
+    toast(`普通关联已保存生效；${pendingSpecial.length} 条特殊关联已暂存，请回列表勾选合同后提交审批`);
+    backToList();
+    return;
   }
 
   const remain = contractRebateCents(ctx.contract);
@@ -854,84 +872,177 @@ function doSave() {
   backToList();
 }
 
-/* ---------------- 增补需求：保存后分组提审页面 ----------------
- * 按「产品线 + 二级关联类型 / 关联货款」分组（单次编辑产品线恒定，等价按类型分组）；
- * 每组独立上传凭证 + 填关联原因，全部填完才能提交；提交后各组各自生成 submissionId（各自一张审批单）。 */
+/* ---------------- 增补需求：待关联列表批量提交审批 ----------------
+ * 用户在待关联列表勾选合同；系统取这些合同下全部“待提审”的特殊关联明细，
+ * 自动按「产品线 + 关联类型」分组。每组独立填写原因、维护凭证；凭证按原合同的客户或合同号归属。 */
 let reviewState = null;
-const reviewGroupKey = r => r.correlationType === '关联货款' ? '关联货款' : `关联到款-${r.subType}`;
+const reviewGroupKey = r => r.subType;
+const reviewRelationLabel = r => r.subType || '关联到款';
+
+function selectedPendingContractIds() {
+  return $$('#tbody .row-check:checked').map(x => x.closest('tr')?.dataset.key).filter(Boolean);
+}
+
+function openBatchReviewFromList() {
+  const ids = selectedPendingContractIds();
+  if (!ids.length) { toast('请先勾选需要提交审批的合同', 'error'); return; }
+  const rows = D.reviewDrafts.filter(r => ids.includes(r.contractId));
+  if (!rows.length) { toast('所选合同无待审批明细', 'error'); return; }
+  openReviewModal(rows);
+}
 
 function openReviewModal(rows) {
   const groups = {};
   rows.forEach(r => {
-    const k = reviewGroupKey(r);
-    (groups[k] = groups[k] || { key: k, rows: [], reason: '', fileName: '', showDetail: false }).rows.push(r);
+    const c = contractById(r.contractId) || {};
+    const rel = reviewRelationLabel(r);
+    const k = `${c.productLine || r.productLine || '—'}||${rel}`;
+    if (!groups[k]) groups[k] = {
+      key: k, productLine: c.productLine || r.productLine || '—', relationType: rel,
+      rows: [], reason: '', evidences: [], expanded: Object.keys(groups).length === 0,
+      scopeType: '客户', scopeValue: '', selectedContracts: []
+    };
+    groups[k].rows.push(Object.assign({}, r, { contract: c }));
   });
-  reviewState = { groups: groups };
+  reviewState = { groups };
   renderReviewModal();
-  showModal('提交审批（按产品线 + 关联类型分组）', [['稍后再传', 'modal-cancel'], ['提交审批', 'submit-review']], 'tools');
+  showModal('批量提交审批', [['取消', 'modal-cancel'], ['全部提交审批', 'submit-review']], 'review');
+}
+
+function matchingEvidencesForRow(g, row) {
+  const c = row.contract || contractById(row.contractId) || {};
+  return g.evidences.filter(e => {
+    const values = e.scopeValues || [];
+    return e.scopeType === '合同' ? values.includes(c.contractNo) : values.includes(c.customer);
+  });
+}
+
+function evidenceFilesText(evidences) {
+  const list = Array.isArray(evidences) ? evidences : (evidences ? [evidences] : []);
+  const files = list.flatMap(e => e.files || []);
+  if (!files.length) return '未关联';
+  const names = files.map(f => typeof f === 'string' ? f : f.name);
+  return names.length === 1 ? names[0] : `${names[0]} 等${names.length}个文件`;
+}
+
+function reviewUploadTime() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function reviewScopeValues(g) {
+  if (g.scopeType === '客户') return g.scopeValue ? [g.scopeValue] : [];
+  return [...(g.selectedContracts || [])];
 }
 
 function renderReviewModal() {
   const groups = Object.values(reviewState.groups);
-  $('#modal-body').innerHTML = `
-    <p class="tool-notice">当前合同产品线「${esc(ctx.contract.productLine)}」；下面按「产品线 + 关联类型」自动分组，每组独立上传一次凭证、填一次关联原因，全部分组都填完才能提交审批。提交后占用共享到款 / 合同剩余返利金额，驳回会释放回去。</p>
-    ${groups.map(g => {
-      const total = sumCents(g.rows, r => r.theCorrelationAmount);
-      return `<div class="review-group" data-gkey="${esc(g.key)}">
-        <div class="review-group-head"><b>${esc(g.key)}</b>
-          <span class="tag">产品线：${esc(ctx.contract.productLine)}</span>
-          <span class="tag">共 ${g.rows.length} 条，合计 ${fmt(yuan(total))}</span></div>
-        <div class="review-group-body">
-          <div class="review-group-row">
-            <button class="btn" data-act="review-detail" data-gkey="${esc(g.key)}">${g.showDetail ? '收起明细' : `查看明细（${g.rows.length} 条）`}</button>
-            <span class="review-file-tag">${g.fileName ? `📎 ${esc(g.fileName)}` : '尚未上传凭证'}</span>
-            <button class="btn" data-act="review-upload" data-gkey="${esc(g.key)}">上传凭证（zip，原型模拟）</button>
-          </div>
-          ${g.showDetail ? `<div class="table-wrap dlg-table"><table>
-            <thead><tr><th>合同号</th><th>客户名称</th><th>到款ID / 杂入单号</th><th>关联金额</th></tr></thead>
-            <tbody>${g.rows.map(r => `<tr>
-              <td>${esc(r.correlationType === '关联货款' ? ctx.contract.contractNo : (r.sourceContractNo || ctx.contract.contractNo))}</td>
-              <td>${esc(r.correlationType === '关联货款' ? ctx.contract.customer : (r.sourceCustomer || ctx.contract.customer))}</td>
-              <td>${esc(r.daokuanId || r.jcNo || '—')}</td>
-              <td>${fmt(r.theCorrelationAmount)}</td></tr>`).join('')}</tbody>
-          </table></div>` : ''}
-          <div class="review-group-row">
-            <label>关联原因</label>
-            <textarea data-act="review-reason" data-gkey="${esc(g.key)}" placeholder="必填，自由文本">${esc(g.reason)}</textarea>
-          </div>
+  $('#modal-body').innerHTML = `${groups.map(g => {
+    const customers = [...new Set(g.rows.map(r => r.contract?.customer).filter(Boolean))];
+    const contracts = [...new Set(g.rows.map(r => r.contract?.contractNo).filter(Boolean))];
+    if (!customers.includes(g.scopeValue)) g.scopeValue = customers[0] || '';
+    g.selectedContracts = (g.selectedContracts || []).filter(v => contracts.includes(v));
+    const missingCount = g.rows.filter(r => !matchingEvidencesForRow(g, r).length).length;
+    const evidenceRows = g.evidences.length ? g.evidences.flatMap((e, eidx) => (e.files || []).map((file, fidx) => `<tr>
+      <td>${esc(e.scopeType)}</td>
+      <td title="${esc((e.scopeValues || []).join('、'))}">${esc((e.scopeValues || []).join('、'))}</td>
+      <td title="${esc(file.name || file)}">${esc(file.name || file)}</td>
+      <td>${esc(file.uploadedAt || '—')}</td>
+      <td><button class="link" data-act="review-view-evidence" data-gkey="${esc(g.key)}" data-eidx="${eidx}" data-fidx="${fidx}">查看</button>
+          <button class="link" data-act="review-remove-evidence-file" data-gkey="${esc(g.key)}" data-eidx="${eidx}" data-fidx="${fidx}">删除</button></td>
+    </tr>`)).join('')
+      : `<tr><td colspan="5" class="empty">暂未上传凭证</td></tr>`;
+
+    const contractPicker = g.scopeType === '合同' ? `<div class="review-contract-dropdown ${g.contractDropdownOpen ? 'open' : ''}">
+      <button type="button" class="review-contract-trigger" data-act="review-contract-dropdown" data-gkey="${esc(g.key)}">
+        <span>${g.selectedContracts.length ? `已选择 ${g.selectedContracts.length} 个合同` : '请选择合同'}</span><span class="caret">∨</span>
+      </button>
+      ${g.contractDropdownOpen ? `<div class="review-contract-pop">
+        <label class="review-check-all"><input type="checkbox" data-act="review-contract-all" data-gkey="${esc(g.key)}" ${contracts.length && g.selectedContracts.length === contracts.length ? 'checked' : ''}> 全选</label>
+        <div class="review-contract-options">${contracts.map(v => `<label><input type="checkbox" data-act="review-contract-item" data-gkey="${esc(g.key)}" value="${esc(v)}" ${g.selectedContracts.includes(v) ? 'checked' : ''}> ${esc(v)}</label>`).join('')}</div>
+      </div>` : ''}
+    </div>` : `<select data-act="review-scope-value" data-gkey="${esc(g.key)}">
+        ${customers.map(v => `<option value="${esc(v)}" ${v === g.scopeValue ? 'selected' : ''}>${esc(v)}</option>`).join('')}
+      </select>`;
+
+    const canUpload = g.scopeType === '客户' ? !!g.scopeValue : g.selectedContracts.length > 0;
+    return `<div class="review-group ${g.expanded ? 'open' : ''}" data-gkey="${esc(g.key)}">
+      <button class="review-group-head" data-act="review-toggle" data-gkey="${esc(g.key)}">
+        <span class="review-arrow">${g.expanded ? '▼' : '▶'}</span>
+        <b>产品线：${esc(g.productLine)}</b><span class="review-sep">|</span>
+        <b>关联类型：${esc(g.relationType)}</b><span class="review-count">（${g.rows.length} 条明细）</span>
+      </button>
+      ${g.expanded ? `<div class="review-group-body">
+        <div class="review-field"><label>原因说明 <b class="req">*</b></label>
+          <textarea data-act="review-reason" data-gkey="${esc(g.key)}" placeholder="请输入本产品线 + 关联类型的原因说明">${esc(g.reason)}</textarea></div>
+
+        <div class="review-evidence-head"><b>关联凭证 <span class="req">*</span></b></div>
+        <div class="review-evidence-add">
+          <select data-act="review-scope-type" data-gkey="${esc(g.key)}">
+            <option value="客户" ${g.scopeType === '客户' ? 'selected' : ''}>按客户</option>
+            <option value="合同" ${g.scopeType === '合同' ? 'selected' : ''}>按合同</option>
+          </select>
+          <div class="review-scope-picker">${contractPicker}</div>
+          <label class="file-pick-btn ${canUpload ? '' : 'disabled'}">选取文件<input type="file" multiple data-act="review-file-input" data-gkey="${esc(g.key)}" ${canUpload ? '' : 'disabled'}></label>
         </div>
-      </div>`;
-    }).join('')}`;
+        <div class="table-wrap review-evidence-table"><table>
+          <thead><tr><th>凭证归属</th><th>客户 / 合同</th><th>文件</th><th>上传时间</th><th>操作</th></tr></thead>
+          <tbody>${evidenceRows}</tbody></table></div>
+
+        <div class="review-evidence-head review-detail-title"><b>审批明细（${g.rows.length} 条）</b></div>
+        <div class="table-wrap review-detail-table"><table>
+          <thead>
+            <tr><th colspan="4">原合同</th><th colspan="3">关联合同</th><th rowspan="2">关联金额</th><th rowspan="2">凭证</th></tr>
+            <tr><th>合同号</th><th>合同剩余返利金额</th><th>事业部</th><th>核算大类</th><th>关联跨合同号</th><th>事业部</th><th>核算大类</th></tr>
+          </thead><tbody>${g.rows.map(r => {
+            const c = r.contract || contractById(r.contractId) || {};
+            const linked = r.sourceContractNo ? contractByNo(r.sourceContractNo) : null;
+            const evs = matchingEvidencesForRow(g, r);
+            return `<tr>
+              <td>${esc(c.contractNo || '—')}</td><td>${fmt(yuan(contractRebateCents(c)))}</td><td>${esc(c.businessDivision || '—')}</td><td>${esc(c.accountCate || '—')}</td>
+              <td>${esc(r.sourceContractNo || '—')}</td><td>${esc(linked?.businessDivision || '—')}</td><td>${esc(linked?.accountCate || '—')}</td>
+              <td>${fmt(r.theCorrelationAmount)}</td><td class="${evs.length ? '' : 'evidence-missing'}">${evs.length ? `<button class="link" data-act="review-view-row-evidence" data-gkey="${esc(g.key)}" data-draftid="${esc(r.draftId || '')}">查看</button>` : '未关联'}</td>
+            </tr>`;
+          }).join('')}</tbody></table></div>
+        ${missingCount ? `<div class="review-warning">还有 ${missingCount} 条明细未关联凭证，请补充后再提交。</div>` : ''}
+      </div>` : ''}
+    </div>`;
+  }).join('')}`;
 }
 
 function submitApproval() {
   const groups = Object.values(reviewState.groups);
-  const missing = groups.find(g => !g.reason.trim() || !g.fileName);
-  if (missing) { toast(`「${missing.key}」还没填关联原因或上传凭证`, 'error'); return; }
+  const missingReason = groups.find(g => !g.reason.trim());
+  if (missingReason) { toast(`「${missingReason.productLine} / ${missingReason.relationType}」还没填写原因说明`, 'error'); return; }
+  const missingEvidence = groups.find(g => g.rows.some(r => !matchingEvidencesForRow(g, r).length));
+  if (missingEvidence) { toast(`「${missingEvidence.productLine} / ${missingEvidence.relationType}」还有明细未关联凭证`, 'error'); return; }
 
   const today = new Date().toISOString().slice(0, 10);
   let totalRows = 0;
+  const submittedDraftIds = new Set();
   groups.forEach(g => {
-    const submissionId = 'SUB' + nextUid();   // 每组各自一张审批单
+    const submissionId = 'SUB' + nextUid();
     g.rows.forEach(r => {
+      const evs = matchingEvidencesForRow(g, r);
       const base = {
-        id: 'R' + nextUid(), contractId: ctx.contract.id, correlationDate: today, status: 2,
-        whetherUnlock: '否', unlockReason: '', submissionId: submissionId, groupKey: g.key,
-        reviewReason: g.reason, evidenceFile: g.fileName
+        id: 'R' + nextUid(), contractId: r.contractId, correlationDate: today, status: 2,
+        whetherUnlock: '否', unlockReason: '', submissionId, groupKey: g.key,
+        reviewReason: g.reason, evidenceFile: evidenceFilesText(evs), evidenceScopeType: [...new Set(evs.map(e => e.scopeType))].join('、'), evidenceScopeValue: [...new Set(evs.flatMap(e => e.scopeValues || []))].join('、')
       };
-      D.correlations.push(r.correlationType === '关联货款'
-        ? Object.assign(base, { correlationType: '关联货款', jcNo: r.jcNo, theCorrelationAmount: Number(r.theCorrelationAmount) })
-        : Object.assign(base, {
-            correlationType: '关联到款', subType: r.subType, daokuanId: r.daokuanId, pickedAmount: r.pickedAmount,
-            sourceContractNo: r.sourceContractNo, sourceCustomer: r.sourceCustomer, theCorrelationAmount: Number(r.theCorrelationAmount)
-          }));
+      D.correlations.push(Object.assign(base, {
+        correlationType: '关联到款', subType: r.subType, daokuanId: r.daokuanId, pickedAmount: r.pickedAmount,
+        sourceContractNo: r.sourceContractNo, sourceCustomer: r.sourceCustomer, theCorrelationAmount: Number(r.theCorrelationAmount)
+      }));
+      if (r.draftId) submittedDraftIds.add(r.draftId);
       totalRows++;
     });
   });
+  D.reviewDrafts = D.reviewDrafts.filter(r => !submittedDraftIds.has(r.draftId));
   reviewState = null;
   closeModal();
-  toast(`已提交审批，共 ${groups.length} 组、${totalRows} 条记录，通过前占用共享到款 / 合同剩余返利金额`);
-  backToList();
+  renderList();
+  toast(`已提交审批，共 ${totalRows} 条记录；审批中金额开始占用合同 / 共享到款额度`);
 }
 
 function doSaveUnlock() {
@@ -1350,8 +1461,8 @@ function openToolsModal() {
             <button class="tool-btn" data-sim="approve">通过</button>
             <button class="tool-btn" data-sim="reject">驳回</button>
           </div>
-          <p class="tool-help">通过：status 由 2（审批中）变为 1（有效），正常计入已关联；驳回：status 变为 0（失效），占用的共享到款 / 杂入单额度释放回池子。审批人、审批链由其他平台配置，这里只模拟结果。</p>`
-          : `<p class="tool-help flat">当前没有审批中的分组。先在待关联合同编辑页发起一笔跨合同 / 跨客户 / 厂商款补 / 其他款补 / 关联货款，保存后按提示提交审批，再回到这里模拟。</p>`}
+          <p class="tool-help">通过：status 由 2（审批中）变为 1（有效），正常计入已关联；驳回：status 变为 0（失效），占用的共享到款额度释放回池子。审批人、审批链由其他平台配置，这里只模拟结果。</p>`
+          : `<p class="tool-help flat">当前没有审批中的分组。先在待关联合同编辑页发起一笔跨合同 / 跨客户 / 厂商款补 / 其他款补，保存后按提示提交审批，再回到这里模拟。</p>`}
       </div>
     </div>`;
   // 弹窗（不是全屏）：沿用示例图的分区与控件规格，面板加宽到 1120px，右上角 × 与底部「关闭」都能关闭
@@ -1589,10 +1700,6 @@ document.addEventListener('click', e => {
       ctx.rows.push({ uid: nextUid(), id: '', saved: false, correlationType: '关联返利', rebateCoding: '', rebateName: '', alreadyBillAmount: '', theCorrelationAmount: '' });
       renderDetail();
       break;
-    case 'add-jc-row':
-      ctx.rows.push({ uid: nextUid(), id: '', saved: false, correlationType: '关联货款', jcNo: '', theCorrelationAmount: '' });
-      renderDetail();
-      break;
     case 'del-row': {
       const checked = $$('#detail-tbody .row-check:checked').map(x => x.dataset.uid);
       if (!checked.length) { toast('请先勾选要删除的数据', 'error'); return; }
@@ -1673,17 +1780,55 @@ document.addEventListener('click', e => {
       break;
     }
     case 'submit-review': submitApproval(); break;
-    case 'review-detail': {
+    case 'open-batch-review': openBatchReviewFromList(); break;
+    case 'batch-menu-toggle': {
+      const pop = act.closest('.batch-menu')?.querySelector('.batch-pop');
+      if (pop) pop.hidden = !pop.hidden;
+      break;
+    }
+    case 'review-toggle': {
       const g = reviewState.groups[act.dataset.gkey];
-      g.showDetail = !g.showDetail;
+      g.expanded = !g.expanded;
       renderReviewModal();
       break;
     }
-    case 'review-upload': {
+    case 'review-contract-dropdown': {
       const g = reviewState.groups[act.dataset.gkey];
-      g.fileName = `凭证_${act.dataset.gkey}_${Date.now().toString().slice(-6)}.zip`;
+      g.contractDropdownOpen = !g.contractDropdownOpen;
       renderReviewModal();
-      toast(`已模拟上传凭证：${g.fileName}（原型不做真实解析）`);
+      break;
+    }
+    case 'review-view-row-evidence': {
+      const g = reviewState.groups[act.dataset.gkey];
+      const row = g?.rows?.find(r => String(r.draftId || '') === String(act.dataset.draftid || ''));
+      if (!row) return;
+      const evs = matchingEvidencesForRow(g, row);
+      const files = evs.flatMap(ev => ev.files || []);
+      if (!files.length) { toast('该明细暂未关联凭证', 'error'); return; }
+      const names = files.map(f => f.name || f).join('、');
+      if (files.length === 1 && files[0].url) window.open(files[0].url, '_blank', 'noopener');
+      else toast(`该明细关联凭证：${names}`);
+      break;
+    }
+    case 'review-view-evidence': {
+      const g = reviewState.groups[act.dataset.gkey];
+      const eidx = Number(act.dataset.eidx), fidx = Number(act.dataset.fidx);
+      const file = g?.evidences?.[eidx]?.files?.[fidx];
+      if (!file) return;
+      if (file.url) window.open(file.url, '_blank', 'noopener');
+      else toast(`原型中已记录文件：${file.name || file}`);
+      break;
+    }
+    case 'review-remove-evidence-file': {
+      const g = reviewState.groups[act.dataset.gkey];
+      const eidx = Number(act.dataset.eidx), fidx = Number(act.dataset.fidx);
+      const ev = g?.evidences?.[eidx];
+      if (!ev) return;
+      const file = ev.files?.[fidx];
+      if (file?.url) URL.revokeObjectURL(file.url);
+      ev.files.splice(fidx, 1);
+      if (!ev.files.length) g.evidences.splice(eidx, 1);
+      renderReviewModal();
       break;
     }
     case 'import-run': {
@@ -1700,7 +1845,7 @@ document.addEventListener('click', e => {
     case 'import-done': closeModal(); renderList(); break;
     case 'modal-cancel':
       closeModal();
-      if (reviewState) { reviewState = null; toast('已取消本次提审，特殊场景的关联需要重新发起'); }
+      if (reviewState) { reviewState = null; toast('已取消本次提交，待审批明细仍保留在待提审状态'); }
       break;
   }
 });
@@ -1712,7 +1857,6 @@ document.addEventListener('change', e => {
   if (e.target.id === 'addon-mode') {
     addonMode = e.target.checked;
     if (!addonMode && ctx) {                 // 关掉增补后，若当前正停在增补专属的选项上，退回基线默认值
-      if (ctx.filterType === '关联货款') ctx.filterType = '关联返利';
       ctx.subType = '通用关联';
     }
     ctx ? renderDetail() : renderList();
@@ -1883,6 +2027,45 @@ document.addEventListener('mousedown', e => {
   document.body.classList.add('column-resizing');
 });
 
+
+// 批量审批弹窗：先选归属/对象，再选文件；选中文件后自动加入凭证表
+ document.addEventListener('change', e => {
+  if (!reviewState) return;
+  const act = e.target.dataset.act;
+  const g = e.target.dataset.gkey ? reviewState.groups[e.target.dataset.gkey] : null;
+  if (!g) return;
+  if (act === 'review-scope-type') {
+    g.scopeType = e.target.value;
+    g.scopeValue = '';
+    g.selectedContracts = [];
+    renderReviewModal();
+  } else if (act === 'review-scope-value') {
+    g.scopeValue = e.target.value;
+  } else if (act === 'review-contract-all') {
+    const contracts = [...new Set(g.rows.map(r => r.contract?.contractNo).filter(Boolean))];
+    g.selectedContracts = e.target.checked ? contracts : [];
+    renderReviewModal();
+  } else if (act === 'review-contract-item') {
+    const v = e.target.value;
+    const set = new Set(g.selectedContracts || []);
+    e.target.checked ? set.add(v) : set.delete(v);
+    g.selectedContracts = [...set];
+    renderReviewModal();
+  } else if (act === 'review-file-input') {
+    const scopeValues = reviewScopeValues(g);
+    if (!scopeValues.length) { toast('请先选择凭证对应的客户或合同', 'error'); e.target.value = ''; return; }
+    const files = [...e.target.files];
+    if (!files.length) return;
+    const uploadedAt = reviewUploadTime();
+    const fileRecords = files.map(f => ({ name: f.name, uploadedAt, url: URL.createObjectURL(f) }));
+    const existed = g.evidences.find(ev => ev.scopeType === g.scopeType && JSON.stringify(ev.scopeValues || []) === JSON.stringify(scopeValues));
+    if (existed) existed.files.push(...fileRecords);
+    else g.evidences.push({ scopeType: g.scopeType, scopeValues: [...scopeValues], files: fileRecords });
+    e.target.value = '';
+    renderReviewModal();
+    toast(`已上传 ${files.length} 个凭证文件`);
+  }
+});
 document.addEventListener('keydown', e => {
   const handle = e.target.closest('.prd-col-resizer');
   if (!handle || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
